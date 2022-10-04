@@ -1,0 +1,3 @@
+scenario_name: firenze2_45_0.1_28.0
+reservation: 128632
+nodesubset: [5, 21, 22, 25, 26, 35]

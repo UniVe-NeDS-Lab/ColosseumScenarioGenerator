@@ -1,0 +1,13 @@
+networkit
+osmnx
+matplotlib
+networkx
+pandas
+geopandas
+seaborn
+shapely
+diskcache
+numpy
+ipython
+ipympl
+configargparse

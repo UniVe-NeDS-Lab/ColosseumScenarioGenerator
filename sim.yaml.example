@@ -1,0 +1,24 @@
+#Transmission frequency in GHz
+frequency: 28
+#Density of the UEs (in #/km^2)
+lambda_ue: 0
+#Density of the gNBs (in #/km^2)
+lambda_gnb: 45
+#Name of the area
+area: firenze
+#Index of the subarea
+sub_area: 2
+#Ratio of donors
+p_donor: 0.1
+# Whether to double the IAB nodes or not
+double_nodes: True
+# Selfinterference pathloss
+doubled_nodes_pl: 0
+# Self interferance delay (0 disable also the pathloss)
+doubled_nodes_delay: 0
+#Remove isoltated nodes
+remove_isolated: True
+#Directory of the DSM rasters
+raster_dir: "~/data/dsm"
+#Directory of the TNSM algorithm results
+truenets_dir: "~results/TNSM/"
