@@ -155,12 +155,12 @@ def make_coverage_graph(n_subs, visgraph, inverse_transmat, viewsheds, f):
                 continue
             if (src, tgt) in visgraph.edges():
                 dist = visgraph[src][tgt]['distance']
-                coverage_graph.add_edge(src, tgt, distance=dist, pathloss=pathgain(dist, f, los=True, fronthaul=False), delay=delay(dist))
+                coverage_graph.add_edge(src, tgt, distance=dist, pathloss=pathgain(dist, f, los=True, fronthaul=False), delay=delay(dist), los=True)
             else:
                 p1 = np.array([visgraph.nodes[src]['x'], visgraph.nodes[src]['y'], visgraph.nodes[src]['z']])
                 p2 = np.array([visgraph.nodes[tgt]['x'], visgraph.nodes[tgt]['y'], visgraph.nodes[tgt]['z']])
                 dist = np.linalg.norm(p2-p1)
-                coverage_graph.add_edge(src, tgt, distance=dist, pathloss=pathgain(dist, f, los=False, fronthaul=False), delay=delay(dist))
+                coverage_graph.add_edge(src, tgt, distance=dist, pathloss=pathgain(dist, f, los=False, fronthaul=False), delay=delay(dist), los=False)
     if n_subs:
         # For each viewshed (each BS)
         for ndx, viewshed in enumerate(viewsheds):
@@ -190,17 +190,18 @@ def double_iab_nodes(coverage_graph, pl, delay):
     doubled_graph = nx.Graph()
     for n in coverage_graph.nodes():
         if coverage_graph.nodes[n]['type'] != 'ue':
-            doubled_graph.add_node(f'{n}_mt', **coverage_graph.nodes[n])
-            doubled_graph.add_node(f'{n}_relay', **coverage_graph.nodes[n])
-            doubled_graph.add_edge(f'{n}_mt', f'{n}_relay', distance=0, pathloss=pl, delay=delay)
+            doubled_graph.add_node(f'{n}_mt', **coverage_graph.nodes[n], iab_type='mt')
+            doubled_graph.add_node(f'{n}_relay', **coverage_graph.nodes[n], iab_type='gnb')
+            doubled_graph.add_edge(f'{n}_mt', f'{n}_relay', distance=0, pathloss=pl, delay=delay, type="wired")
             for e in coverage_graph[n].items():
                 if coverage_graph.nodes[e[0]]['type'] != 'ue':
-                    doubled_graph.add_edge(f'{n}_mt', f'{e[0]}_mt', **e[1])
-                    doubled_graph.add_edge(f'{n}_relay', f'{e[0]}_relay', **e[1])
+                    doubled_graph.add_edge(f'{n}_mt', f'{e[0]}_mt', **e[1], type="wireless")
+                    doubled_graph.add_edge(f'{n}_relay', f'{e[0]}_relay', **e[1], type="wireless")
+                    doubled_graph.add_edge(f'{n}_mt', f'{e[0]}_relay', **e[1], type="wireless")
+                    doubled_graph.add_edge(f'{n}_relay', f'{e[0]}_mt', **e[1], type="wireless")
                 else:
-                    doubled_graph.add_edge(f'{n}_mt', e[0], **e[1])
-                    doubled_graph.add_edge(f'{n}_relay', e[0], **e[1])
-
+                    doubled_graph.add_edge(f'{n}_mt', e[0], **e[1], type="wireless")
+                    doubled_graph.add_edge(f'{n}_relay', e[0], **e[1], type="wireless")
         else:
             doubled_graph.add_node(f'{n}', **coverage_graph.nodes[n])
     return doubled_graph
@@ -218,6 +219,11 @@ def order_nodes(coverage_graph):
         if d['type'] == 'ue':
             ordered_nodes.append(n)
     return ordered_nodes
+
+
+def reindex_nodes(graph):
+    for ndx, n in enumerate(order_nodes(graph)):
+        graph.nodes[n]['index'] = ndx+1
 
 
 def generate_colosseum(graph, scenario_name):
@@ -241,14 +247,14 @@ def generate_colosseum(graph, scenario_name):
                     pathlossMatrix[src][tgt] = graph[name_map[src]['id']][name_map[tgt]['id']]['pathloss']
                     delayMatrix[src][tgt] = graph[name_map[src]['id']][name_map[tgt]['id']]['delay']
                 except KeyError:
-                    pathlossMatrix[src][tgt] = 0
+                    pathlossMatrix[src][tgt] = -np.inf
                     delayMatrix[src][tgt] = 0
 
     np.savetxt(f'scenarios/{scenario_name}/colosseum/pathlossMatrix.csv', pathlossMatrix, fmt='%.2f')
     np.savetxt(f'scenarios/{scenario_name}/colosseum/delayMatrix.csv', delayMatrix, fmt='%.9f')
 
 
-def print_map(g, coverage_graph, boundbox, scenario_name):
+def print_map(coverage_graph, boundbox, scenario_name):
     def get_node_color(type):
         if type == 'relay':
             return 'orange'
@@ -256,13 +262,18 @@ def print_map(g, coverage_graph, boundbox, scenario_name):
             return 'firebrick'
         return 'yellow'
 
+    def get_edge_width(d):
+        if d.get('los', 'False'):
+            return 0.5
+        else:
+            return 0
+
     # Save image of the network
-    pos = {n: (d['y'], d['x']) for n, d in g.nodes(data=True) if d['type'] != 'ue'}
+    pos = {n: (d['y'], d['x']) for n, d in coverage_graph.nodes(data=True) if d['type'] != 'ue'}
     labels = {}
     for ndx, n in enumerate(order_nodes(coverage_graph)):
-        n_old = int(n.split('_')[0])
-        if n_old in pos:
-            labels[n_old] = ndx
+        if n in pos and ('_' not in str(n) or 'mt' in str(n)):
+            labels[n] = n.split('_')[0]  # f'{ndx+1}'  #
     # labels = {n.split('_')[0]:ndx for ndx, n in enumerate(order_nodes(coverage_graph)) if n.split('_')[0] in pos.keys()}
 
     fig, ax = plt.subplots(1, 1, figsize=(5, 5), dpi=300)
@@ -270,41 +281,44 @@ def print_map(g, coverage_graph, boundbox, scenario_name):
     transform = read_dsm_transform(args.area, boundbox)
     transf_geom = buildings.geometry.affine_transform((~transform).to_shapely())
     transf_geom.plot(ax=ax, color='silver')
-    nx.draw_networkx(g,
-                     pos,
-                     ax=ax,
-                     node_size=15,
-                     edge_color='mediumseagreen',
-                     width=0.5,
-                     labels=labels,
-                     node_color=[get_node_color(d['type']) for n, d in g.nodes(data=True)],
-                     font_size=6,
-                     horizontalalignment='left',
-                     verticalalignment='bottom',
-                     font_color='black')
+    nx.draw_networkx_nodes(coverage_graph,
+                           pos,
+                           ax=ax,
+                           node_color=[get_node_color(d['type']) for n, d in coverage_graph.nodes(data=True)],
+                           node_size=15)
+    nx.draw_networkx_edges(coverage_graph,
+                           pos,
+                           ax=ax,
+                           edge_color='mediumseagreen',
+                           width=[get_edge_width(d) for s, t, d in coverage_graph.edges(data=True)])
+    nx.draw_networkx_labels(coverage_graph,
+                            pos,
+                            ax=ax,
+                            font_size=6,
+                            horizontalalignment='left',
+                            verticalalignment='bottom',
+                            font_color='black',
+                            labels=labels)
     ues = np.array([[d['x'], d['y']] for r, d in coverage_graph.nodes(data=True) if d['type'] == 'ue'])
     if ues.size > 0:
         ax.scatter(ues[:, 1], ues[:, 0], s=5)
     # plt.title(f'{scenario_name}')
     plt.grid('on')
-    plt.axis('on')
+    plt.axis('off')
     plt.tight_layout()
-    #ax.tick_params(left=True, bottom=True, labelleft=True, labelbottom=True)
-
+    ax.tick_params(left=True, bottom=True, labelleft=True, labelbottom=True)
+    plt.tight_layout()
     plt.savefig(f'scenarios/{scenario_name}/map.png')
 
 
-def print_nodes(g, coverage_graph, boundbox, scenario_name):
-    def get_node_color(type):
-        return 'orange'
+def print_area(coverage_graph, boundbox, scenario_name):
 
     # Save image of the network
-    pos = {n: (d['y'], d['x']) for n, d in g.nodes(data=True) if d['type'] != 'ue'}
+    pos = {n: (d['y'], d['x']) for n, d in coverage_graph.nodes(data=True) if d['type'] != 'ue'}
     labels = {}
     for ndx, n in enumerate(order_nodes(coverage_graph)):
-        n_old = int(n.split('_')[0])
-        if n_old in pos:
-            labels[n_old] = ndx
+        if n in pos and ('_' not in str(n) or 'mt' in str(n)):
+            labels[n] = f'{ndx+1}'  # n.split('_')[0]
     # labels = {n.split('_')[0]:ndx for ndx, n in enumerate(order_nodes(coverage_graph)) if n.split('_')[0] in pos.keys()}
 
     fig, ax = plt.subplots(1, 1, figsize=(5, 5), dpi=300)
@@ -312,27 +326,69 @@ def print_nodes(g, coverage_graph, boundbox, scenario_name):
     transform = read_dsm_transform(args.area, boundbox)
     transf_geom = buildings.geometry.affine_transform((~transform).to_shapely())
     transf_geom.plot(ax=ax, color='silver')
-    nx.draw_networkx(g,
-                     pos,
-                     ax=ax,
-                     node_size=15,
-                     edge_color='mediumseagreen',
-                     width=0,
-                     labels=labels,
-                     node_color=[get_node_color(d['type']) for n, d in g.nodes(data=True)],
-                     font_size=6,
-                     horizontalalignment='left',
-                     verticalalignment='bottom',
-                     font_color='black')
+    # plt.grid(True)
+    plt.axis('off')
+    # ax.set_xticklabels([])
+    # ax.set_yticklabels([])
+    plt.tight_layout()
+    ax.tick_params(left=True, bottom=True, labelleft=True, labelbottom=True)
+    plt.savefig(f'scenarios/{scenario_name}/area.png')
+
+
+def print_nodes(coverage_graph, boundbox, scenario_name):
+    def get_node_color(type):
+        if type == 'relay':
+            return 'orange'
+        elif type == 'donor':
+            return 'firebrick'
+        return 'yellow'
+
+    def get_edge_width(d):
+        if d.get('los', 'False'):
+            return 0.5
+        else:
+            return 0
+
+    # Save image of the network
+    pos = {n: (d['y'], d['x']) for n, d in coverage_graph.nodes(data=True) if d['type'] != 'ue'}
+    labels = {}
+    for ndx, n in enumerate(order_nodes(coverage_graph)):
+        if n in pos and ('_' not in str(n) or 'mt' in str(n)):
+            labels[n] = f'{ndx+1}'  # n.split('_')[0]
+    # labels = {n.split('_')[0]:ndx for ndx, n in enumerate(order_nodes(coverage_graph)) if n.split('_')[0] in pos.keys()}
+
+    fig, ax = plt.subplots(1, 1, figsize=(5, 5), dpi=300)
+    buildings = get_buildings(boundbox)
+    transform = read_dsm_transform(args.area, boundbox)
+    transf_geom = buildings.geometry.affine_transform((~transform).to_shapely())
+    transf_geom.plot(ax=ax, color='silver')
+    nx.draw_networkx_nodes(coverage_graph,
+                           pos,
+                           ax=ax,
+                           node_color='orange',
+                           node_size=15)
+    # nx.draw_networkx_edges(coverage_graph,
+    #                        pos,
+    #                        ax=ax,
+    #                        edge_color='mediumseagreen',
+    #                        width=[get_edge_width(d) for s, t, d in coverage_graph.edges(data=True)])
+    # nx.draw_networkx_labels(coverage_graph,
+    #                         pos,
+    #                         ax=ax,
+    #                         font_size=6,
+    #                         horizontalalignment='left',
+    #                         verticalalignment='bottom',
+    #                         font_color='black',
+    #                         labels=labels)
     ues = np.array([[d['x'], d['y']] for r, d in coverage_graph.nodes(data=True) if d['type'] == 'ue'])
     if ues.size > 0:
         ax.scatter(ues[:, 1], ues[:, 0], s=5)
     # plt.title(f'{scenario_name}')
-    plt.grid('on')
-    # plt.axis('on')
+    plt.grid(True)
+    plt.axis('off')
     plt.tight_layout()
-    #ax.tick_params(left=True, bottom=True, labelleft=True, labelbottom=True)
-
+    ax.tick_params(left=True, bottom=True, labelleft=True, labelbottom=True)
+    plt.tight_layout()
     plt.savefig(f'scenarios/{scenario_name}/nodes.png')
 
 
@@ -374,9 +430,12 @@ def main(args):
                                          args.doubled_nodes_delay)
     else:
         doubled_graph = coverage_graph
+    reindex_nodes(doubled_graph)
     generate_colosseum(doubled_graph, scenario_name)
-    print_nodes(g, doubled_graph, boundbox, scenario_name)
-    print_map(g, doubled_graph, boundbox, scenario_name)
+    # print_nodes(g, doubled_graph, boundbox, scenario_name)
+    print_nodes(doubled_graph, boundbox, scenario_name)
+    print_map(doubled_graph, boundbox, scenario_name)
+    print_area(doubled_graph, boundbox, scenario_name)
     print_nodemap(doubled_graph, scenario_name)
     nx.write_graphml(doubled_graph, f"scenarios/{scenario_name}/graph.graphml")
     os.system(f'matlab -batch "convertColosseum "{scenario_name}" "')
