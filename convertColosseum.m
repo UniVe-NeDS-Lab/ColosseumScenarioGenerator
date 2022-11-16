@@ -16,12 +16,13 @@ function[] = convertColosseum(scenarioName)
     %% channel matrix
     delayMatrix = readmatrix(inFolder+'/delayMatrix.csv');
     pathlossMatrix = readmatrix(inFolder+'/pathlossMatrix.csv');
-
+    pl_min = min(pathlossMatrix, [],'all')
+    pl_max = max(pathlossMatrix(~isinf(pathlossMatrix)), [],'all')
     clusteredTapMatrix = cell(m_size(1), m_size(1));
     for i = 1:m_size(1)
         for j = 1:m_size(1)
             tap.delay = [delayMatrix(i,j), 0, 0, 0];
-            tap.iq = [db2mag(-pathlossMatrix(i,j)), 0, 0, 0];
+            tap.iq = [db2mag(-pathlossMatrix(i,j)+pl_min), 0, 0, 0];
             clusteredTapMatrix{i, j} = tap;
         end
     end

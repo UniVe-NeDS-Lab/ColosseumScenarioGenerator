@@ -108,6 +108,7 @@ def set_donors(vg, donors_ratio, coverage_graph):
         if n in donors:
             coverage_graph.nodes[n]['type'] = 'donor'
             vg.nodes[n]['type'] = 'donor'
+            vg.nodes[n]['role'] = 'donor'
         else:
             coverage_graph.nodes[n]['type'] = 'relay'
             vg.nodes[n]['type'] = 'relay'
@@ -120,11 +121,11 @@ def pathloss(d, f, los=True):
         # TODO: use 3d distance
     breakpoint_distance = 2*m.pi*h_bs*h_ut*f*1e9/speed_of_light
     if d < breakpoint_distance:
-        pl_los = 32.4 + 21*m.log10(d)+20*m.log10(f) + nrv_los.rvs(1)[0]
+        pl_los = 32.4 + 21*m.log10(d)+20*m.log10(f)  # + nrv_los.rvs(1)[0]
     else:
-        pl_los = 32.4 + 40*m.log10(d)+20*m.log10(f) - 9.5*m.log10((breakpoint_distance)**2 + (h_bs-h_ut)**2) + nrv_los.rvs(1)[0]
+        pl_los = 32.4 + 40*m.log10(d)+20*m.log10(f) - 9.5*m.log10((breakpoint_distance)**2 + (h_bs-h_ut)**2)  # + nrv_los.rvs(1)[0]
 
-    pl_nlos = 22.4 + 35.3*m.log10(d)+21.3*m.log10(f) - 0.3*(h_ut - 1.5) + nrv_nlos.rvs(1)[0]
+    pl_nlos = 22.4 + 35.3*m.log10(d)+21.3*m.log10(f) - 0.3*(h_ut - 1.5)  # + nrv_nlos.rvs(1)[0]
 
     if los:
         return pl_los
@@ -190,8 +191,8 @@ def double_iab_nodes(coverage_graph, pl, delay):
     doubled_graph = nx.Graph()
     for n in coverage_graph.nodes():
         if coverage_graph.nodes[n]['type'] != 'ue':
-            doubled_graph.add_node(f'{n}_mt', **coverage_graph.nodes[n], iab_type='mt')
-            doubled_graph.add_node(f'{n}_relay', **coverage_graph.nodes[n], iab_type='gnb')
+            doubled_graph.add_node(f'{n}_mt', **coverage_graph.nodes[n], iab_type='mt', role='mt')
+            doubled_graph.add_node(f'{n}_relay', **coverage_graph.nodes[n], iab_type='gnb', role='du')
             doubled_graph.add_edge(f'{n}_mt', f'{n}_relay', distance=0, pathloss=pl, delay=delay, type="wired")
             for e in coverage_graph[n].items():
                 if coverage_graph.nodes[e[0]]['type'] != 'ue':
@@ -242,16 +243,24 @@ def generate_colosseum(graph, scenario_name):
     delayMatrix = np.zeros(shape=(len(nodes), len(nodes)))
     for src in name_map.keys():
         for tgt in name_map.keys():
-            if src != tgt:
-                try:
-                    pathlossMatrix[src][tgt] = graph[name_map[src]['id']][name_map[tgt]['id']]['pathloss']
-                    delayMatrix[src][tgt] = graph[name_map[src]['id']][name_map[tgt]['id']]['delay']
-                except KeyError:
-                    pathlossMatrix[src][tgt] = -np.inf
-                    delayMatrix[src][tgt] = 0
+            try:
+                pathlossMatrix[src][tgt] = -graph[name_map[src]['id']][name_map[tgt]['id']]['pathloss']
+                delayMatrix[src][tgt] = graph[name_map[src]['id']][name_map[tgt]['id']]['delay']
+            except KeyError:
+                pathlossMatrix[src][tgt] = np.inf
+                delayMatrix[src][tgt] = 0
 
     np.savetxt(f'scenarios/{scenario_name}/colosseum/pathlossMatrix.csv', pathlossMatrix, fmt='%.2f')
     np.savetxt(f'scenarios/{scenario_name}/colosseum/delayMatrix.csv', delayMatrix, fmt='%.9f')
+
+
+def remove_nlos(graph: nx.Graph):
+    to_del = []
+    for e in graph.edges(data=True):
+        if 'los' in e[2]:
+            if e[2]['los'] == False:
+                to_del.append(e)
+    graph.remove_edges_from(to_del)
 
 
 def print_map(coverage_graph, boundbox, scenario_name):
@@ -422,7 +431,10 @@ def main(args):
                                          args.frequency)
 
     set_donors(g, args.p_donor, coverage_graph)
-    scenario_name = f'{args.area}{args.sub_area}_{args.lambda_gnb}_{args.p_donor}_{args.frequency}'
+    if args.only_los:
+        scenario_name = f'{args.area}{args.sub_area}_{args.lambda_gnb}_{args.p_donor}_{args.frequency}_onlylos'
+    else:
+        scenario_name = f'{args.area}{args.sub_area}_{args.lambda_gnb}_{args.p_donor}_{args.frequency}_nlos'
     os.makedirs(f'scenarios/{scenario_name}/colosseum/', exist_ok=True)
     if args.double_nodes:
         doubled_graph = double_iab_nodes(coverage_graph,
@@ -430,6 +442,10 @@ def main(args):
                                          args.doubled_nodes_delay)
     else:
         doubled_graph = coverage_graph
+
+    if args.only_los:
+        remove_nlos(doubled_graph)
+
     reindex_nodes(doubled_graph)
     generate_colosseum(doubled_graph, scenario_name)
     # print_nodes(g, doubled_graph, boundbox, scenario_name)
@@ -438,7 +454,8 @@ def main(args):
     print_area(doubled_graph, boundbox, scenario_name)
     print_nodemap(doubled_graph, scenario_name)
     nx.write_graphml(doubled_graph, f"scenarios/{scenario_name}/graph.graphml")
-    os.system(f'matlab -batch "convertColosseum "{scenario_name}" "')
+    print("Now run:")
+    print(f'matlab -batch "convertColosseum "{scenario_name}""')
 
 
 if __name__ == '__main__':
@@ -451,7 +468,9 @@ if __name__ == '__main__':
     p.add('--p_donor', required=True, type=float)
     p.add('--double_nodes', required=True, type=lambda x: bool(strtobool(x)))
     p.add('--remove_isolated', required=True, type=lambda x: bool(strtobool(x)))
+    p.add('--only_los', required=True, type=lambda x: bool(strtobool(x)))
     p.add('--doubled_nodes_pl', required=True, type=float)
     p.add('--doubled_nodes_delay', required=True, type=float)
+
     args = p.parse_args()
     main(args)
