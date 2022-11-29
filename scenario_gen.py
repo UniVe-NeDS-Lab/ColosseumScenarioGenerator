@@ -24,7 +24,7 @@ cache = Cache(".cache")
 
 
 raster_dir = 'dsm/'
-truenets_dir = 'results/'
+truenets_dir = 'results_italia/'
 
 tx_power = 30
 tx_gain = 10
@@ -36,21 +36,22 @@ nrv_los = norm(0, sigma_los)
 nrv_nlos = norm(0, sigma_nlos)
 h_bs = 10
 h_ut = 1.5
+epsg = 0
 
 
 def transform(shape):
     import pyproj
     from shapely.ops import transform
     wgs84 = pyproj.CRS('EPSG:4326')
-    montemario = pyproj.CRS('EPSG:3003')
-    project = pyproj.Transformer.from_crs(montemario, wgs84, always_xy=True).transform
+    source_epsg = pyproj.CRS(f'EPSG:{epsg}')
+    project = pyproj.Transformer.from_crs(source_epsg, wgs84, always_xy=True).transform
     return transform(project, shape)
 
 
 @cache.memoize()
 def get_road_graph(boundbox):
     osmg = ox.graph_from_polygon(boundbox)
-    posmg = ox.project_graph(osmg, 'EPSG:3003')
+    posmg = ox.project_graph(osmg, f'EPSG:{epsg}')
     osm_road = ox.get_undirected(posmg)
     return osm_road
 
@@ -59,7 +60,7 @@ def get_road_graph(boundbox):
 def get_buildings(boundbox):
     tags = {"building": True}
     gdf = ox.geometries_from_polygon(transform(boundbox), tags)
-    pgdf = ox.project_gdf(gdf, 'EPSG:3003')
+    pgdf = ox.project_gdf(gdf, f'EPSG:{epsg}')
     return pgdf
 
 
@@ -68,7 +69,7 @@ def get_area(area,  sub_area_id):
     with open(f'{area.lower()}.csv') as sacsv:
         subareas_csv = list(csv.reader(sacsv, delimiter=','))
     for row in subareas_csv:
-        if row[1] == sub_area_id:
+        if int(row[1]) == int(sub_area_id):
             # Read the WKT of this subarea
             sub_area = wkt.loads(row[0])
             # Create a buffer of max_d / 2 around it
@@ -78,7 +79,7 @@ def get_area(area,  sub_area_id):
 @cache.memoize()
 def read_dsm_transform(area, boundbox):
     big_dsm = rio.open(
-        "%s/%s.tif" % (raster_dir, area.lower()), crs=3003)
+        "%s/%s.tif" % (raster_dir, area.lower()), crs=epsg)
     raster, transform1 = mask.mask(
         big_dsm, [boundbox], crop=True, indexes=1)
     return transform1
@@ -282,7 +283,7 @@ def print_map(coverage_graph, boundbox, scenario_name):
     labels = {}
     for ndx, n in enumerate(order_nodes(coverage_graph)):
         if n in pos and ('_' not in str(n) or 'mt' in str(n)):
-            labels[n] = n.split('_')[0]  # f'{ndx+1}'  #
+            labels[n] = f'{n} ({ndx+1})'  #
     # labels = {n.split('_')[0]:ndx for ndx, n in enumerate(order_nodes(coverage_graph)) if n.split('_')[0] in pos.keys()}
 
     fig, ax = plt.subplots(1, 1, figsize=(5, 5), dpi=300)
@@ -346,10 +347,10 @@ def print_area(coverage_graph, boundbox, scenario_name):
 
 def print_nodes(coverage_graph, boundbox, scenario_name):
     def get_node_color(type):
-        if type == 'relay':
-            return 'orange'
-        elif type == 'donor':
-            return 'firebrick'
+        # if type == 'relay':
+        #     return 'orange'
+        # elif type == 'donor':
+        #     return 'firebrick'
         return 'yellow'
 
     def get_edge_width(d):
@@ -410,7 +411,7 @@ def print_nodemap(graph, scenario_name):
 
 
 def main(args):
-    path = f'{truenets_dir}/{args.area}/twostep/{args.sub_area}/r1/1/100.0/{args.lambda_gnb}/visibility.graphml.gz'
+    path = f'{truenets_dir}/{args.area}/{args.strategy}/{args.sub_area}/r1/1/{args.ratio}/{args.lambda_gnb}/visibility.graphml.gz'
     vgs = glob.glob(path)
     if not len(vgs):
         print(f'{path} not found')
@@ -420,7 +421,7 @@ def main(args):
     area = subscriber_area.area*1e-6  # km2
     n_subs = m.ceil(area*args.lambda_ue) if args.lambda_ue else 0
     viewsheds = np.load(vgs[0].replace('visibility.graphml.gz', 'viewsheds.npy'))
-    invtransmat = np.load(f'{truenets_dir}{args.area}/twostep/{args.sub_area}/inverse_translation_matrix.npy')
+    invtransmat = np.load(f'{truenets_dir}{args.area}/{args.strategy}/{args.sub_area}/inverse_translation_matrix.npy')
     if args.remove_isolated:
         g = remove_isolated_gnb(g)
         g = nx.convert_node_labels_to_integers(g)
@@ -471,6 +472,10 @@ if __name__ == '__main__':
     p.add('--only_los', required=True, type=lambda x: bool(strtobool(x)))
     p.add('--doubled_nodes_pl', required=True, type=float)
     p.add('--doubled_nodes_delay', required=True, type=float)
+    p.add('--epsg', required=True, type=int)
+    p.add('--strategy', required=True, type=str)
+    p.add('--ratio', required=True, type=float)
 
     args = p.parse_args()
+    epsg = args.epsg
     main(args)
