@@ -1,5 +1,4 @@
 import json
-from scipy.stats import norm
 import configargparse
 import os
 from rasterio import mask
@@ -21,10 +20,11 @@ from distutils.util import strtobool
 ox.settings.use_cache = True
 ox.settings.log_console = False
 cache = Cache(".cache")
+import cartopy.crs as ccrs
+import cartopy.io.img_tiles as cimgt
 
 
-raster_dir = 'dsm/'
-truenets_dir = 'results_italia/'
+truenets_dir = '/mnt/ric_dais_nfs_maccari/gabriel/results/NGI23/results/'
 
 tx_power = 30
 tx_gain = 10
@@ -32,8 +32,8 @@ rx_gain_backhaul = 10  # from Polese et Al
 rx_gain_fronthaul = 3  # need to find a reference
 sigma_los = 4
 sigma_nlos = 7.8
-nrv_los = norm(0, sigma_los)
-nrv_nlos = norm(0, sigma_nlos)
+#nrv_los = norm(0, sigma_los)
+#nrv_nlos = norm(0, sigma_nlos)
 h_bs = 10
 h_ut = 1.5
 epsg = 0
@@ -64,7 +64,6 @@ def get_buildings(boundbox):
     return pgdf
 
 
-@cache.memoize()
 def get_area(area,  sub_area_id):
     with open(f'{area.lower()}.csv') as sacsv:
         subareas_csv = list(csv.reader(sacsv, delimiter=','))
@@ -74,16 +73,6 @@ def get_area(area,  sub_area_id):
             sub_area = wkt.loads(row[0])
             # Create a buffer of max_d / 2 around it
             return sub_area, sub_area.buffer(300/2)
-
-
-@cache.memoize()
-def read_dsm_transform(area, boundbox):
-    big_dsm = rio.open(
-        "%s/%s.tif" % (raster_dir, area.lower()), crs=epsg)
-    raster, transform1 = mask.mask(
-        big_dsm, [boundbox], crop=True, indexes=1)
-    return transform1
-
 
 def set_donors(vg, donors_ratio, coverage_graph):
     # Set donors by applying group centrality to each component. Isolated nodes are all donors
@@ -163,18 +152,18 @@ def make_coverage_graph(n_subs, visgraph, inverse_transmat, viewsheds, f):
                 p2 = np.array([visgraph.nodes[tgt]['x'], visgraph.nodes[tgt]['y'], visgraph.nodes[tgt]['z']])
                 dist = np.linalg.norm(p2-p1)
                 coverage_graph.add_edge(src, tgt, distance=dist, pathloss=pathgain(dist, f, los=False, fronthaul=False), delay=delay(dist), los=False)
-    if n_subs:
-        # For each viewshed (each BS)
-        for ndx, viewshed in enumerate(viewsheds):
-            pos = np.array([visgraph.nodes[ndx]['x'], visgraph.nodes[ndx]['y']])
-            for p in subs_loc:
-                coverage_graph.add_node(f'{p[0]}_{p[1]}', type='ue', x=p[0], y=p[1])
-                dist = np.linalg.norm(pos-p)
-                if viewshed[p[0], p[1]]:
-                    # if the element in position pos is in LOS, then add to the graph together with th
-                    coverage_graph.add_edge(ndx, f'{p[0]}_{p[1]}', distance=dist, pathloss=pathgain(dist, f, los=True, fronthaul=True), delay=delay(dist))
-                else:
-                    coverage_graph.add_edge(ndx, f'{p[0]}_{p[1]}', distance=dist, pathloss=pathgain(dist, f, los=False, fronthaul=True), delay=delay(dist))
+    # if n_subs:
+    #     # For each viewshed (each BS)
+    #     for ndx, viewshed in enumerate(viewsheds):
+    #         pos = np.array([visgraph.nodes[ndx]['x'], visgraph.nodes[ndx]['y']])
+    #         for p in subs_loc:
+    #             coverage_graph.add_node(f'{p[0]}_{p[1]}', type='ue', x=p[0], y=p[1])
+    #             dist = np.linalg.norm(pos-p)
+    #             if viewshed[p[0], p[1]]:
+    #                 # if the element in position pos is in LOS, then add to the graph together with th
+    #                 coverage_graph.add_edge(ndx, f'{p[0]}_{p[1]}', distance=dist, pathloss=pathgain(dist, f, los=True, fronthaul=True), delay=delay(dist))
+    #             else:
+    #                 coverage_graph.add_edge(ndx, f'{p[0]}_{p[1]}', distance=dist, pathloss=pathgain(dist, f, los=False, fronthaul=True), delay=delay(dist))
 
     return coverage_graph
 
@@ -228,7 +217,7 @@ def reindex_nodes(graph):
         graph.nodes[n]['index'] = ndx+1
 
 
-def generate_colosseum(graph, scenario_name):
+def generate_colosseum(graph, scenario_name, colosseum_base_loss):
     # Generate nodes positions file
     name_map = {}
     nodesPositions = []
@@ -245,7 +234,7 @@ def generate_colosseum(graph, scenario_name):
     for src in name_map.keys():
         for tgt in name_map.keys():
             try:
-                pathlossMatrix[src][tgt] = -graph[name_map[src]['id']][name_map[tgt]['id']]['pathloss']
+                pathlossMatrix[src][tgt] = -graph[name_map[src]['id']][name_map[tgt]['id']]['pathloss']-colosseum_base_loss
                 delayMatrix[src][tgt] = graph[name_map[src]['id']][name_map[tgt]['id']]['delay']
             except KeyError:
                 pathlossMatrix[src][tgt] = np.inf
@@ -279,18 +268,18 @@ def print_map(coverage_graph, boundbox, scenario_name):
             return 0
 
     # Save image of the network
-    pos = {n: (d['y'], d['x']) for n, d in coverage_graph.nodes(data=True) if d['type'] != 'ue'}
+    pos = {n: (d['x_3003'], d['y_3003']) for n, d in coverage_graph.nodes(data=True) if d['type'] != 'ue'}
     labels = {}
     for ndx, n in enumerate(order_nodes(coverage_graph)):
         if n in pos and ('_' not in str(n) or 'mt' in str(n)):
-            labels[n] = f'{n} ({ndx+1})'  #
+            labels[n] = f'{ndx+1}'  #f'{n} ({ndx+1})'
     # labels = {n.split('_')[0]:ndx for ndx, n in enumerate(order_nodes(coverage_graph)) if n.split('_')[0] in pos.keys()}
 
     fig, ax = plt.subplots(1, 1, figsize=(5, 5), dpi=300)
     buildings = get_buildings(boundbox)
-    transform = read_dsm_transform(args.area, boundbox)
-    transf_geom = buildings.geometry.affine_transform((~transform).to_shapely())
-    transf_geom.plot(ax=ax, color='silver')
+    #transform = read_dsm_transform(args.area, boundbox)
+    #transf_geom = buildings.geometry.affine_transform((~transform).to_shapely())
+    buildings.plot(ax=ax, color='silver')
     nx.draw_networkx_nodes(coverage_graph,
                            pos,
                            ax=ax,
@@ -320,122 +309,81 @@ def print_map(coverage_graph, boundbox, scenario_name):
     plt.tight_layout()
     plt.savefig(f'scenarios/{scenario_name}/map.png')
 
-
-def print_area(coverage_graph, boundbox, scenario_name):
-
-    # Save image of the network
-    pos = {n: (d['y'], d['x']) for n, d in coverage_graph.nodes(data=True) if d['type'] != 'ue'}
-    labels = {}
-    for ndx, n in enumerate(order_nodes(coverage_graph)):
-        if n in pos and ('_' not in str(n) or 'mt' in str(n)):
-            labels[n] = f'{ndx+1}'  # n.split('_')[0]
-    # labels = {n.split('_')[0]:ndx for ndx, n in enumerate(order_nodes(coverage_graph)) if n.split('_')[0] in pos.keys()}
-
-    fig, ax = plt.subplots(1, 1, figsize=(5, 5), dpi=300)
-    buildings = get_buildings(boundbox)
-    transform = read_dsm_transform(args.area, boundbox)
-    transf_geom = buildings.geometry.affine_transform((~transform).to_shapely())
-    transf_geom.plot(ax=ax, color='silver')
-    # plt.grid(True)
-    plt.axis('off')
-    # ax.set_xticklabels([])
-    # ax.set_yticklabels([])
-    plt.tight_layout()
-    ax.tick_params(left=True, bottom=True, labelleft=True, labelbottom=True)
-    plt.savefig(f'scenarios/{scenario_name}/area.png')
-
-
-def print_nodes(coverage_graph, boundbox, scenario_name):
-    def get_node_color(type):
-        # if type == 'relay':
-        #     return 'orange'
-        # elif type == 'donor':
-        #     return 'firebrick'
-        return 'yellow'
-
+def plot_map_cartopy(g, scenario_name, epsg):
     def get_edge_width(d):
         if d.get('los', 'False'):
-            return 0.5
+            return 1
         else:
             return 0
+    def get_node_color(type):
+        if type == 'relay':
+            return 'black'
+        elif type == 'donor':
+            return 'red'
+        return 'yellow'
+    
+    pos = {n:(k['x_3003'], k['y_3003']) for n,k in g.nodes(data=True)}
 
-    # Save image of the network
-    pos = {n: (d['y'], d['x']) for n, d in coverage_graph.nodes(data=True) if d['type'] != 'ue'}
-    labels = {}
-    for ndx, n in enumerate(order_nodes(coverage_graph)):
-        if n in pos and ('_' not in str(n) or 'mt' in str(n)):
-            labels[n] = f'{ndx+1}'  # n.split('_')[0]
-    # labels = {n.split('_')[0]:ndx for ndx, n in enumerate(order_nodes(coverage_graph)) if n.split('_')[0] in pos.keys()}
+    max_x = max(pos.values(), key=lambda x: x[0])[0]+100
+    max_y = max(pos.values(), key=lambda x: x[1])[1]+100
+    min_x = min(pos.values(), key=lambda x: x[0])[0]-100
+    min_y = min(pos.values(), key=lambda x: x[1])[1]-100
+    extent = [min_x, max_x, min_y, max_y]
+    proj = ccrs.epsg(f'{epsg}')
+    fig = plt.figure(figsize=(5, 5))
+    ax = fig.add_subplot(1, 1, 1, projection=proj)
+    #ax = plt.axes(projection=proj)
+    ax.set_extent(extent, proj)
+    request = cimgt.OSM(cache=True)
+    ax.add_image(request, 15)    # 5 = zoom level
+    
+    ## graph
+    nx.draw_networkx_nodes(g, 
+                           pos=pos,
+                           node_color=[get_node_color(d['type']) for n, d in g.nodes(data=True)],
+                           node_size=25)
+    colors = []
+    nx.draw_networkx_edges(g, 
+                           pos=pos,
+                           edge_color='grey',
+                           width=[get_edge_width(d) for s, t, d in g.edges(data=True)])
+    
 
-    fig, ax = plt.subplots(1, 1, figsize=(5, 5), dpi=300)
-    buildings = get_buildings(boundbox)
-    transform = read_dsm_transform(args.area, boundbox)
-    transf_geom = buildings.geometry.affine_transform((~transform).to_shapely())
-    transf_geom.plot(ax=ax, color='silver')
-    nx.draw_networkx_nodes(coverage_graph,
-                           pos,
-                           ax=ax,
-                           node_color='orange',
-                           node_size=15)
-    # nx.draw_networkx_edges(coverage_graph,
-    #                        pos,
-    #                        ax=ax,
-    #                        edge_color='mediumseagreen',
-    #                        width=[get_edge_width(d) for s, t, d in coverage_graph.edges(data=True)])
-    # nx.draw_networkx_labels(coverage_graph,
-    #                         pos,
-    #                         ax=ax,
-    #                         font_size=6,
-    #                         horizontalalignment='left',
-    #                         verticalalignment='bottom',
-    #                         font_color='black',
-    #                         labels=labels)
-    ues = np.array([[d['x'], d['y']] for r, d in coverage_graph.nodes(data=True) if d['type'] == 'ue'])
-    if ues.size > 0:
-        ax.scatter(ues[:, 1], ues[:, 0], s=5)
-    # plt.title(f'{scenario_name}')
-    plt.grid(True)
-    plt.axis('off')
-    plt.tight_layout()
-    ax.tick_params(left=True, bottom=True, labelleft=True, labelbottom=True)
-    plt.tight_layout()
-    plt.savefig(f'scenarios/{scenario_name}/nodes.png')
-
-
-def print_nodemap(graph, scenario_name):
-    nodemap = {}
-    for ndx, n in enumerate(order_nodes(graph)):
-        nodemap[f'Node {ndx+1}'] = "None"
-    with open(f"scenarios/{scenario_name}/nodemap.json", 'w') as fw:
-        json.dump(nodemap, fw, indent=4)
-
+    plt.savefig(f'scenarios/{scenario_name}/nodes.png', dpi=600,  bbox_inches='tight')
+    plt.savefig(f'scenarios/{scenario_name}/nodes.pdf', dpi=600,  bbox_inches='tight')
+    plt.clf()
 
 def main(args):
-    path = f'{truenets_dir}/{args.area}/{args.strategy}/{args.sub_area}/r1/1/{args.ratio}/{args.lambda_gnb}/visibility.graphml.gz'
+    for area in args.area:
+        for frequency in args.frequency:
+            for l in args.lambda_gnb:
+                for ol in args.only_los:
+                    generate_scenario(area, frequency, l, ol, args)
+
+def generate_scenario(area, frequency, lambda_gnb, only_los, args):
+    path = f'{truenets_dir}/{area}/{args.strategy}/{args.sub_area}/r1/1/{args.ratio}/{lambda_gnb}/visibility.graphml.gz'
     vgs = glob.glob(path)
     if not len(vgs):
         print(f'{path} not found')
         exit(0)
     g = nx.read_graphml(vgs[0], node_type=int)
-    subscriber_area, boundbox = get_area(args.area, args.sub_area)
-    area = subscriber_area.area*1e-6  # km2
-    n_subs = m.ceil(area*args.lambda_ue) if args.lambda_ue else 0
+    subscriber_area, boundbox = get_area(area, args.sub_area)
     viewsheds = np.load(vgs[0].replace('visibility.graphml.gz', 'viewsheds.npy'))
-    invtransmat = np.load(f'{truenets_dir}{args.area}/{args.strategy}/{args.sub_area}/inverse_translation_matrix.npy')
+    invtransmat = np.load(f'{truenets_dir}{area}/{args.strategy}/{args.sub_area}/inverse_translation_matrix.npy')
     if args.remove_isolated:
         g = remove_isolated_gnb(g)
         g = nx.convert_node_labels_to_integers(g)
-    coverage_graph = make_coverage_graph(n_subs,
+    coverage_graph = make_coverage_graph(0,
                                          g,
                                          invtransmat,
                                          viewsheds,
-                                         args.frequency)
+                                         frequency)
 
     set_donors(g, args.p_donor, coverage_graph)
-    if args.only_los:
-        scenario_name = f'{args.area}{args.sub_area}_{args.lambda_gnb}_{args.p_donor}_{args.frequency}_onlylos'
+    if only_los:
+        scenario_name = f'{area}{args.sub_area}_{lambda_gnb}_{args.p_donor}_{frequency}_onlylos'
     else:
-        scenario_name = f'{args.area}{args.sub_area}_{args.lambda_gnb}_{args.p_donor}_{args.frequency}_nlos'
+        scenario_name = f'{area}{args.sub_area}_{lambda_gnb}_{args.p_donor}_{frequency}_nlos'
     os.makedirs(f'scenarios/{scenario_name}/colosseum/', exist_ok=True)
     if args.double_nodes:
         doubled_graph = double_iab_nodes(coverage_graph,
@@ -444,16 +392,13 @@ def main(args):
     else:
         doubled_graph = coverage_graph
 
-    if args.only_los:
+    if only_los:
         remove_nlos(doubled_graph)
 
     reindex_nodes(doubled_graph)
-    generate_colosseum(doubled_graph, scenario_name)
-    # print_nodes(g, doubled_graph, boundbox, scenario_name)
-    print_nodes(doubled_graph, boundbox, scenario_name)
+    generate_colosseum(doubled_graph, scenario_name, args.colosseum_base_loss)
     print_map(doubled_graph, boundbox, scenario_name)
-    print_area(doubled_graph, boundbox, scenario_name)
-    print_nodemap(doubled_graph, scenario_name)
+    plot_map_cartopy(doubled_graph, scenario_name, args.epsg)
     nx.write_graphml(doubled_graph, f"scenarios/{scenario_name}/graph.graphml")
     print("Now run:")
     print(f'matlab -batch "convertColosseum "{scenario_name}""')
@@ -461,20 +406,21 @@ def main(args):
 
 if __name__ == '__main__':
     p = configargparse.ArgParser(default_config_files=['sim.yaml'])
-    p.add('--frequency', required=True, type=float)
+    p.add('--frequency', required=True, type=float, action='append')
     p.add('--lambda_ue', required=True, type=int)
-    p.add('--lambda_gnb', required=True, type=int)
-    p.add('--area', required=True, type=str)
+    p.add('--lambda_gnb', required=True, type=int, action='append')
+    p.add('--area', required=True, type=str, action='append')
     p.add('--sub_area', required=True, type=str)
     p.add('--p_donor', required=True, type=float)
     p.add('--double_nodes', required=True, type=lambda x: bool(strtobool(x)))
     p.add('--remove_isolated', required=True, type=lambda x: bool(strtobool(x)))
-    p.add('--only_los', required=True, type=lambda x: bool(strtobool(x)))
+    p.add('--only_los', required=True, type=lambda x: bool(strtobool(x)), action='append')
     p.add('--doubled_nodes_pl', required=True, type=float)
     p.add('--doubled_nodes_delay', required=True, type=float)
     p.add('--epsg', required=True, type=int)
     p.add('--strategy', required=True, type=str)
     p.add('--ratio', required=True, type=float)
+    p.add('--colosseum_base_loss', required=True, type=float)
 
     args = p.parse_args()
     epsg = args.epsg
