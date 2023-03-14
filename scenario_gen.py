@@ -24,7 +24,7 @@ import cartopy.crs as ccrs
 import cartopy.io.img_tiles as cimgt
 
 
-truenets_dir = '/mnt/ric_dais_nfs_maccari/gabriel/results/NGI23/results/'
+truenets_dir = '/home/gabriel/WORKS/NGI/ColosseumScenarioGenerator/results/'
 
 tx_power = 30
 tx_gain = 10
@@ -152,18 +152,22 @@ def make_coverage_graph(n_subs, visgraph, inverse_transmat, viewsheds, f):
                 p2 = np.array([visgraph.nodes[tgt]['x'], visgraph.nodes[tgt]['y'], visgraph.nodes[tgt]['z']])
                 dist = np.linalg.norm(p2-p1)
                 coverage_graph.add_edge(src, tgt, distance=dist, pathloss=pathgain(dist, f, los=False, fronthaul=False), delay=delay(dist), los=False)
-    # if n_subs:
-    #     # For each viewshed (each BS)
-    #     for ndx, viewshed in enumerate(viewsheds):
-    #         pos = np.array([visgraph.nodes[ndx]['x'], visgraph.nodes[ndx]['y']])
-    #         for p in subs_loc:
-    #             coverage_graph.add_node(f'{p[0]}_{p[1]}', type='ue', x=p[0], y=p[1])
-    #             dist = np.linalg.norm(pos-p)
-    #             if viewshed[p[0], p[1]]:
-    #                 # if the element in position pos is in LOS, then add to the graph together with th
-    #                 coverage_graph.add_edge(ndx, f'{p[0]}_{p[1]}', distance=dist, pathloss=pathgain(dist, f, los=True, fronthaul=True), delay=delay(dist))
-    #             else:
-    #                 coverage_graph.add_edge(ndx, f'{p[0]}_{p[1]}', distance=dist, pathloss=pathgain(dist, f, los=False, fronthaul=True), delay=delay(dist))
+    if n_subs:
+        _, boundbox = get_area('barcelona', args.sub_area)
+        raster = read_dsm_transform(f"dsm/barcelona.tif", boundbox)
+        # For each viewshed (each BS)
+        for ndx, viewshed in enumerate(viewsheds):
+            if ndx in visgraph.nodes():
+                pos = np.array([visgraph.nodes[ndx]['x'], visgraph.nodes[ndx]['y']])
+                for p in subs_loc:
+                    pos_3003 = raster.xy(p[0], p[1])
+                    coverage_graph.add_node(f'{p[0]}_{p[1]}', type='ue', x=p[0], y=p[1], x_3003 = pos_3003[0], y_3003 = pos_3003[1])
+                    dist = np.linalg.norm(pos-p)
+                    if viewshed[p[0], p[1]]:
+                        # if the element in position pos is in LOS, then add to the graph together with th
+                        coverage_graph.add_edge(ndx, f'{p[0]}_{p[1]}', distance=dist, pathloss=pathgain(dist, f, los=True, fronthaul=True), delay=delay(dist))
+                    else:
+                        coverage_graph.add_edge(ndx, f'{p[0]}_{p[1]}', distance=dist, pathloss=pathgain(dist, f, los=False, fronthaul=True), delay=delay(dist))
 
     return coverage_graph
 
@@ -252,6 +256,24 @@ def remove_nlos(graph: nx.Graph):
                 to_del.append(e)
     graph.remove_edges_from(to_del)
 
+def read_dsm_transform(area, boundbox):
+    from rasterio.io import MemoryFile
+    big_dsm = rio.open(area, crs=f'EPSG:{epsg}')
+    raster, transform1 = rio.mask.mask(big_dsm, [boundbox], crop=True, indexes=1)
+    with MemoryFile() as memfile:
+        new_dataset = memfile.open(driver='GTiff',
+                                    height=raster.shape[0],
+                                    width=raster.shape[1],
+                                    count=1, dtype=str(raster.dtype),
+                                    crs=f'EPSG:{epsg}',
+                                    transform=transform1,
+                                    nodata=-9999
+                                    )
+        new_dataset.write(raster, 1)
+        new_dataset.close()
+        dataset = memfile.open(crs=f'EPSG:{epsg}')
+        return dataset
+
 
 def print_map(coverage_graph, boundbox, scenario_name):
     def get_node_color(type):
@@ -268,7 +290,8 @@ def print_map(coverage_graph, boundbox, scenario_name):
             return 0
 
     # Save image of the network
-    pos = {n: (d['x_3003'], d['y_3003']) for n, d in coverage_graph.nodes(data=True) if d['type'] != 'ue'}
+    gnbs = [n for n, d in coverage_graph.nodes(data=True)]
+    pos = {n: (d['x_3003'], d['y_3003']) for n, d in coverage_graph.nodes(data=True)}
     labels = {}
     for ndx, n in enumerate(order_nodes(coverage_graph)):
         if n in pos and ('_' not in str(n) or 'mt' in str(n)):
@@ -277,30 +300,31 @@ def print_map(coverage_graph, boundbox, scenario_name):
 
     fig, ax = plt.subplots(1, 1, figsize=(5, 5), dpi=300)
     buildings = get_buildings(boundbox)
-    #transform = read_dsm_transform(args.area, boundbox)
     #transf_geom = buildings.geometry.affine_transform((~transform).to_shapely())
     buildings.plot(ax=ax, color='silver')
     nx.draw_networkx_nodes(coverage_graph,
                            pos,
+                           nodelist=gnbs,
                            ax=ax,
-                           node_color=[get_node_color(d['type']) for n, d in coverage_graph.nodes(data=True)],
+                           node_color=[get_node_color(d['type']) for n, d in coverage_graph.nodes(data=True) if n in gnbs],
                            node_size=15)
-    nx.draw_networkx_edges(coverage_graph,
-                           pos,
-                           ax=ax,
-                           edge_color='mediumseagreen',
-                           width=[get_edge_width(d) for s, t, d in coverage_graph.edges(data=True)])
-    nx.draw_networkx_labels(coverage_graph,
-                            pos,
-                            ax=ax,
-                            font_size=6,
-                            horizontalalignment='left',
-                            verticalalignment='bottom',
-                            font_color='black',
-                            labels=labels)
-    ues = np.array([[d['x'], d['y']] for r, d in coverage_graph.nodes(data=True) if d['type'] == 'ue'])
-    if ues.size > 0:
-        ax.scatter(ues[:, 1], ues[:, 0], s=5)
+    # nx.draw_networkx_edges(coverage_graph,
+    #                        pos,
+    #                        nodelist=gnbs,
+    #                        ax=ax,
+    #                        edge_color='mediumseagreen',
+    #                        width=[get_edge_width(d) for s, t, d in coverage_graph.edges(data=True)])
+    # nx.draw_networkx_labels(coverage_graph,
+    #                         pos,
+    #                         ax=ax,
+    #                         font_size=6,
+    #                         horizontalalignment='left',
+    #                         verticalalignment='bottom',
+    #                         font_color='black',
+    #                         labels=labels)
+    ues = np.array([[d['x_3003'], d['y_3003']] for r, d in coverage_graph.nodes(data=True) if d['type'] == 'ue'])
+    # if ues.size > 0:
+    #     ax.scatter(ues[:, 1], ues[:, 0], s=5)
     # plt.title(f'{scenario_name}')
     plt.grid('on')
     plt.axis('off')
@@ -370,10 +394,13 @@ def generate_scenario(area, frequency, lambda_gnb, only_los, args):
     subscriber_area, boundbox = get_area(area, args.sub_area)
     viewsheds = np.load(vgs[0].replace('visibility.graphml.gz', 'viewsheds.npy'))
     invtransmat = np.load(f'{truenets_dir}{area}/{args.strategy}/{args.sub_area}/inverse_translation_matrix.npy')
+    to_remove = [n for n in g.nodes() if n not in args.subset]
+    for n in to_remove:
+        g.remove_node(n)
     if args.remove_isolated:
         g = remove_isolated_gnb(g)
         g = nx.convert_node_labels_to_integers(g)
-    coverage_graph = make_coverage_graph(0,
+    coverage_graph = make_coverage_graph(int(args.lambda_ue*subscriber_area.area/1000000),
                                          g,
                                          invtransmat,
                                          viewsheds,
@@ -398,7 +425,7 @@ def generate_scenario(area, frequency, lambda_gnb, only_los, args):
     reindex_nodes(doubled_graph)
     generate_colosseum(doubled_graph, scenario_name, args.colosseum_base_loss)
     print_map(doubled_graph, boundbox, scenario_name)
-    plot_map_cartopy(doubled_graph, scenario_name, args.epsg)
+    #plot_map_cartopy(doubled_graph, scenario_name, args.epsg)
     nx.write_graphml(doubled_graph, f"scenarios/{scenario_name}/graph.graphml")
     print("Now run:")
     print(f'matlab -batch "convertColosseum "{scenario_name}""')
@@ -421,6 +448,8 @@ if __name__ == '__main__':
     p.add('--strategy', required=True, type=str)
     p.add('--ratio', required=True, type=float)
     p.add('--colosseum_base_loss', required=True, type=float)
+    p.add('--subset', required=True, type=int, action='append')
+
 
     args = p.parse_args()
     epsg = args.epsg
