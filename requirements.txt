@@ -11,3 +11,4 @@ numpy
 ipython
 ipympl
 configargparse
+rasterio

@@ -24,9 +24,6 @@ import rasterio.mask
 import math as m
 
 
-truenets_dir = '/home/gabriele.gemmi/nfs/gabriel/results/MedComNet/results/'
-raster_dir = '/home/gabriele.gemmi/nfs/gabriel/data/dtm_fusion/'
-
 
 def mytransform(shape, epsg):
     wgs84 = pyproj.CRS('EPSG:4326')
@@ -51,9 +48,26 @@ def get_buildings(boundbox, epsg):
     return pgdf
 
 class ScenarioGenerator():
-    def __init__(self, args):
-        self.args = args
-        self.area= args.area
+    def __init__(self, frequency, lambda_gnb, area, sub_area, p_donor, double_nodes, remove_isolated, only_los, double_nodes_pl, double_nodes_delay, epsg, strategy, ratio, colosseum_base_loss, subset, directed, truenets_dir, raster_dir):
+        self.frequency = frequency
+        self.lambda_gnb = lambda_gnb
+        self.area = area
+        self.sub_area = sub_area
+        self.p_donor = p_donor
+        self.double_nodes = double_nodes
+        self.remove_isolated = remove_isolated
+        self.only_los = only_los
+        self.double_nodes_pl = double_nodes_pl
+        self.double_nodes_delay = double_nodes_delay
+        self.epsg = epsg
+        self.strategy = strategy
+        self.ratio = ratio
+        self.colosseum_base_loss = colosseum_base_loss
+        self.subset = subset
+        self.directed =  directed
+        self.area= area
+        self.truenets_dir = truenets_dir
+        self.raster_dir = raster_dir 
         self.tx_power = 30
         self.tx_gain = 10
         self.rx_gain_backhaul = 10  # from Polese et Al
@@ -68,9 +82,15 @@ class ScenarioGenerator():
         self.kb = 1.380649*(10**-23)  # J/K
         self.t = 300  # K
         self.nf = 5
-        self.subscriber_area, self.boundbox = self.get_area(args.sub_area)
+        self.subscriber_area, self.boundbox = self.get_area(self.sub_area)
         self.raster = self.read_dsm_transform(self.boundbox)
         self.buildings = get_buildings(self.boundbox, self.epsg)
+        
+
+
+    
+    def set_lambda_ue(self, lambda_ue):
+        self.lambda_ue = lambda_ue
 
     def get_area(self, sub_area_id):
         with open(f'{self.area.lower()}.csv') as sacsv:
@@ -185,7 +205,7 @@ class ScenarioGenerator():
         
 
     def make_coverage_graph(self, n_subs, visgraph, inverse_transmat, viewsheds, f):
-        print(f"{n_subs} subscribers")
+        #print(f"{n_subs} subscribers")
         rng = np.random.default_rng()
         outdoor_ues = rng.choice(a=inverse_transmat, size=int(n_subs*0.2), axis=0)
         indoor_ues = self.get_indoor_ues(inverse_transmat, int(n_subs*0.8))
@@ -231,7 +251,7 @@ class ScenarioGenerator():
                         snr = self.get_snr(pl, 40e6)
                         capacity = self.get_shannon_capacity(snr, 40e6)
                         coverage_graph.add_edge(f'{p[0]}_{p[1]}', ndx, distance=dist,pathloss=pl, snr=snr, capacity=capacity, delay=self.delay(dist), los=False, indoor=True, fronthaul=True)
-        print(f"{coverage_graph}")
+        #print(f"{coverage_graph}")
         return coverage_graph
 
 
@@ -250,7 +270,7 @@ class ScenarioGenerator():
             if coverage_graph.nodes[n]['type'] != 'ue':
                 doubled_graph.add_node(f'{n}_mt', **coverage_graph.nodes[n], iab_type='mt', role='mt')
                 doubled_graph.add_node(f'{n}_relay', **coverage_graph.nodes[n], iab_type='gnb', role='du')
-                doubled_graph.add_edge(f'{n}_mt', f'{n}_relay', distance=0, pathloss=self.args.pl, delay=self.args.delay, type="wired")
+                doubled_graph.add_edge(f'{n}_mt', f'{n}_relay', distance=0, pathloss=self.pl, delay=self.delay, type="wired")
                 for e in coverage_graph[n].items():
                     if coverage_graph.nodes[e[0]]['type'] != 'ue':
                         doubled_graph.add_edge(f'{n}_mt', f'{e[0]}_mt', **e[1], type="wireless")
@@ -320,7 +340,7 @@ class ScenarioGenerator():
         graph.remove_edges_from(to_del)
 
     def read_dsm_transform(self, boundbox):
-        big_dsm = rio.open(f"{raster_dir}/{self.area}.tif", crs=f'EPSG:{self.epsg}')
+        big_dsm = rio.open(f"{self.raster_dir}/{self.area}.tif", crs=f'EPSG:{self.epsg}')
         raster, transform1 = rio.mask.mask(big_dsm, [boundbox], crop=True, indexes=1)
         with MemoryFile() as memfile:
             new_dataset = memfile.open(driver='GTiff',
@@ -463,37 +483,28 @@ class ScenarioGenerator():
                 digraph.add_edge(e[1],e[0],**d)
         return digraph
 
-    def generate_scenario(self, frequency, lambda_gnb, only_los, lambda_ue):
-        args = self.args
-        path = f'{truenets_dir}/{self.area}/{args.strategy}/{args.sub_area}/r1/1/{args.ratio}/{lambda_gnb}/visibility.graphml.gz'
-        vgs = glob.glob(path)
-        if not len(vgs):
-            print(f'{path} not found')
-            exit(0)
-        g = nx.read_graphml(vgs[0], node_type=int)
-        
-        viewsheds = np.load(vgs[0].replace('visibility.graphml.gz', 'viewsheds.npy'))
-        invtransmat = np.load(f'{truenets_dir}{self.area}/{args.strategy}/{args.sub_area}/inverse_translation_matrix.npy')
-        if args.subset:
-            to_remove = [n for n in g.nodes() if n not in args.subset]
+    def generate_scenario(self,vg_path, frequency, lambda_gnb, only_los, lambda_ue):
+        g = nx.read_graphml(vg_path, node_type=int)
+        scenario_name = self.get_scenario_name(only_los, lambda_gnb, lambda_ue, frequency)
+        viewsheds = np.load(vg_path.replace('visibility.graphml.gz', 'viewsheds.npy'))
+        invtransmat = np.load(f'{self.truenets_dir}{self.area}/{self.strategy}/{self.sub_area}/inverse_translation_matrix.npy')
+        if self.subset:
+            to_remove = [n for n in g.nodes() if n not in self.subset]
             for n in to_remove:
                 g.remove_node(n)
-        if args.remove_isolated:
+        if self.remove_isolated:
             g = self.remove_isolated_gnb(g)
             g = nx.convert_node_labels_to_integers(g)
         coverage_graph = self.make_coverage_graph(int(lambda_ue*self.subscriber_area.area/1000000),
-                                            g,
-                                            invtransmat,
-                                            viewsheds,
-                                            frequency)
+                                                  g,
+                                                  invtransmat,
+                                                  viewsheds,
+                                                  frequency)
 
-        self.set_donors(g, args.p_donor, coverage_graph)
-        if only_los:
-            scenario_name = f'{args.area}{args.sub_area}_{lambda_gnb}_{lambda_ue}_{args.p_donor}_{frequency}_onlylos'
-        else:
-            scenario_name = f'{args.area}{args.sub_area}_{lambda_gnb}_{lambda_ue}_{args.p_donor}_{frequency}_nlos'
+        self.set_donors(g, self.p_donor, coverage_graph)
+        
         os.makedirs(f'scenarios/{scenario_name}/colosseum/', exist_ok=True)
-        if args.double_nodes:
+        if self.double_nodes:
             doubled_graph = self.double_iab_nodes(coverage_graph)
         else:
             doubled_graph = coverage_graph
@@ -502,26 +513,41 @@ class ScenarioGenerator():
             self.remove_nlos(doubled_graph)
             
         self.reindex_nodes(doubled_graph)
-        if args.directed:
+        if self.directed:
             doubled_graph = self.make_directed(doubled_graph)
         else:
             self.generate_colosseum(doubled_graph, scenario_name)
         
+        return doubled_graph
         
-        self.print_map(doubled_graph, scenario_name)
-        #plot_map_cartopy(doubled_graph, scenario_name, args.epsg)
-        nx.write_graphml(doubled_graph, f"scenarios/{scenario_name}/graph.graphml")
-        print("Now run:")
-        print(f'matlab -batch "convertColosseum "{scenario_name}""')        
+    def read_vg(self, lambda_gnb):
+        path = f'{self.truenets_dir}/{self.area}/{self.strategy}/{self.sub_area}/r1/1/{self.ratio}/{lambda_gnb}/visibility.graphml.gz'
+        vgs = glob.glob(path)
+        if not len(vgs):
+            print(f'{path} not found')
+            return None
+        return vgs[0]
+
+    def get_scenario_name(self, only_los, lambda_gnb, lambda_ue, frequency):
+        if only_los:
+            scenario_name = f'{self.area}{self.sub_area}_{lambda_gnb}_{lambda_ue}_{self.p_donor}_{frequency}_onlylos'
+        else:
+            scenario_name = f'{self.area}{self.sub_area}_{lambda_gnb}_{lambda_ue}_{self.p_donor}_{frequency}_nlos'
+        return scenario_name
 
     def main(self):
-        for frequency in self.args.frequency:
-            for l in self.args.lambda_gnb:
-                for ol in self.args.only_los:
-                    for lue in self.args.lambda_ue:
-                        self.generate_scenario(frequency, l, ol, lue)
-
-    
+        for frequency in self.frequency:
+            for l in self.lambda_gnb:
+                for ol in self.only_los:
+                    for lue in self.lambda_ue:
+                        vg_path = self.read_vg(lue)
+                        scenario_name = self.get_scenario_name(ol, l, lue, frequency)
+                        doubled_graph = self.generate_scenario(vg_path, frequency, l, ol, lue)
+                        self.print_map(doubled_graph, scenario_name)
+                        #self.plot_map_cartopy(doubled_graph, scenario_name, self.epsg)
+                        nx.write_graphml(doubled_graph, f"scenarios/{scenario_name}/graph.graphml")
+                        print("Now run:")
+                        print(f'matlab -batch "convertColosseum "{scenario_name}""')     
 
 
 if __name__ == '__main__':
@@ -547,5 +573,8 @@ if __name__ == '__main__':
 
     args = p.parse_args()
     epsg = args.epsg
-    sc = ScenarioGenerator(args)
+    truenets_dir = '/home/gabriele.gemmi/nfs/gabriel/results/MedComNet/results/'
+    raster_dir = '/home/gabriele.gemmi/nfs/gabriel/data/dtm_fusion/'
+    sc = ScenarioGenerator(args.frequency, args.lambda_gnb, args.area, args.sub_area, args.p_donor, args.double_nodes, args.remove_isolated, args.only_los, args.double_nodes_pl, args.double_nodes_delay, args.epsg, args.strategy, args.ratio, args.colosseum_base_loss, args.subset, args.directed, truenets_dir, raster_dir)
+    sc.set_lambda_ue(args.lambda_ue)
     sc.main()
