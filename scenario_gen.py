@@ -104,7 +104,8 @@ class ScenarioGenerator():
 
     def set_donors(self, vg, donors_ratio, coverage_graph):
         # Set donors by applying group centrality to each component. Isolated nodes are all donors
-        cg = [vg.subgraph(cc) for cc in nx.connected_components(vg)]
+        #cg = [vg.subgraph(cc) for cc in nx.connected_components(vg)]
+        cg = [vg]
         donors = []
         if donors_ratio >= 1:
             return vg.nodes()
@@ -155,10 +156,9 @@ class ScenarioGenerator():
         return loss - noise  - self.nf
 
     def get_shannon_capacity(self, snr, bandwidth):
-        if snr<1:
-            return 0
-        else:
-            return bandwidth*m.log2(1+snr) / 10**6 #to get Mbps
+        lin_snr = 10**(snr/10)
+        bw = bandwidth*m.log2(1+lin_snr) / 10**6 #to get Mbps
+        return bw
         
     def get_indoor_pl(self, f):
         #TR 38.901 model O2I high loss
@@ -495,7 +495,7 @@ class ScenarioGenerator():
         if self.remove_isolated:
             g = self.remove_isolated_gnb(g)
             g = nx.convert_node_labels_to_integers(g)
-        coverage_graph = self.make_coverage_graph(int(lambda_ue*self.subscriber_area.area/1000000),
+        coverage_graph = self.make_coverage_graph(m.ceil(lambda_ue*self.subscriber_area.area/1000000),
                                                   g,
                                                   invtransmat,
                                                   viewsheds,
