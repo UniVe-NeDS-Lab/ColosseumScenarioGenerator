@@ -48,7 +48,7 @@ def get_buildings(boundbox, epsg):
     return pgdf
 
 class ScenarioGenerator():
-    def __init__(self, frequency, lambda_gnb, area, sub_area, p_donor, double_nodes, remove_isolated, only_los, double_nodes_pl, double_nodes_delay, epsg, strategy, ratio, colosseum_base_loss, subset, directed, truenets_dir, raster_dir):
+    def __init__(self, frequency, lambda_gnb, area, sub_area, p_donor, double_nodes, remove_isolated, only_los, double_nodes_pl, double_nodes_delay, epsg, strategy, ratio, colosseum_base_loss, subset, directed, truenets_dir, raster_dir, seed=None):
         self.frequency = frequency
         self.lambda_gnb = lambda_gnb
         self.area = area
@@ -68,10 +68,7 @@ class ScenarioGenerator():
         self.area= area
         self.truenets_dir = truenets_dir
         self.raster_dir = raster_dir 
-        self.tx_power = 30
-        self.tx_gain = 10
-        self.rx_gain_backhaul = 10  # from Polese et Al
-        self.rx_gain_fronthaul = 3  # need to find a reference
+        
         self.sigma_los = 4
         self.sigma_nlos = 7.8
         #nrv_los = norm(0, sigma_los)
@@ -82,12 +79,27 @@ class ScenarioGenerator():
         self.kb = 1.380649*(10**-23)  # J/K
         self.t = 300  # K
         self.nf = 5
+        self.set_randomgen(seed)
         self.subscriber_area, self.boundbox = self.get_area(self.sub_area)
         self.raster = self.read_dsm_transform(self.boundbox)
         self.buildings = get_buildings(self.boundbox, self.epsg)
-        
 
+    def set_channel(self, fh_bw, bh_bw, fh_mimo, bh_mimo):
+        self.fronthaul_bandwidth = fh_bw
+        self.backhaul_bandwidth = bh_bw
+        self.fronthaul_mimo = fh_mimo
+        self.backhaul_mimo = bh_mimo
+        self.tx_power = 30
+        self.tx_gain = 10
+        self.rx_gain_backhaul = 10  # from Polese et Al
+        self.rx_gain_fronthaul = 3  # need to find a reference
 
+    def set_randomgen(self, seed=None):
+        if seed:
+            self.seed = seed
+        else:
+            self.seed = np.random.randint(65535)
+        self.rng = np.random.default_rng(self.seed)
     
     def set_lambda_ue(self, lambda_ue):
         self.lambda_ue = lambda_ue
@@ -155,9 +167,9 @@ class ScenarioGenerator():
         noise = 10*m.log10(1000*self.kb*self.t*bandwidth)
         return loss - noise  - self.nf
 
-    def get_shannon_capacity(self, snr, bandwidth):
+    def get_shannon_capacity(self, snr, bandwidth, mimo_chains):
         lin_snr = 10**(snr/10)
-        bw = bandwidth*m.log2(1+lin_snr) / 10**6 #to get Mbps
+        bw = mimo_chains*bandwidth*m.log2(1+lin_snr) / 10**6 #to get Mbps
         return bw
         
     def get_indoor_pl(self, f):
@@ -183,16 +195,14 @@ class ScenarioGenerator():
         return distance / speed_of_light
 
     def get_indoor_ues(self, outdoor_ues, n):
-        import pdb;
-        
         max_x = np.max(outdoor_ues[:,0])
         max_y = np.max(outdoor_ues[:,1])
         outdoor_ues = outdoor_ues.tolist()
         i=0
         indoor_ues = []
         while i<n:
-            x = np.random.randint(0, max_x, 1)
-            y = np.random.randint(0, max_y, 1)
+            x = self.rng.integers(0, max_x, 1)
+            y = self.rng.integers(0, max_y, 1)
             x_3003, y_3003 = self.raster.xy(x[0],y[0])
 
             #import pdb; pdb.set_trace()
@@ -206,8 +216,7 @@ class ScenarioGenerator():
 
     def make_coverage_graph(self, n_subs, visgraph, inverse_transmat, viewsheds, f):
         #print(f"{n_subs} subscribers")
-        rng = np.random.default_rng()
-        outdoor_ues = rng.choice(a=inverse_transmat, size=int(n_subs*0.2), axis=0)
+        outdoor_ues = self.rng.choice(a=inverse_transmat, size=int(n_subs*0.2), axis=0)
         indoor_ues = self.get_indoor_ues(inverse_transmat, int(n_subs*0.8))
         coverage_graph = nx.Graph()
         coverage_graph.add_nodes_from(visgraph.nodes(data=True))
@@ -218,16 +227,16 @@ class ScenarioGenerator():
                 if (src, tgt) in visgraph.edges():
                     dist = visgraph[src][tgt]['distance']
                     pl = self.pathgain(dist, f, los=True, fronthaul=False, indoor=False)
-                    snr = self.get_snr(pl, 400e6)
-                    capacity = self.get_shannon_capacity(snr, 400e6)
+                    snr = self.get_snr(pl, self.backhaul_bandwidth)
+                    capacity = self.get_shannon_capacity(snr, self.backhaul_bandwidth, self.backhaul_mimo)
                     coverage_graph.add_edge(src, tgt, distance=dist, pathloss=pl, snr=snr, capacity=capacity, delay=self.delay(dist), los=True)
                 else:
                     p1 = np.array([visgraph.nodes[src]['x'], visgraph.nodes[src]['y'], visgraph.nodes[src]['z']])
                     p2 = np.array([visgraph.nodes[tgt]['x'], visgraph.nodes[tgt]['y'], visgraph.nodes[tgt]['z']])
                     dist = np.linalg.norm(p2-p1)
                     pl = self.pathgain(dist, f, los=False, fronthaul=False, indoor=False)
-                    snr = self.get_snr(pl, 400e6)
-                    capacity = self.get_shannon_capacity(snr, 400e6)
+                    snr = self.get_snr(pl, self.backhaul_bandwidth)
+                    capacity = self.get_shannon_capacity(snr, self.backhaul_bandwidth, self.backhaul_mimo)
                     coverage_graph.add_edge(src, tgt, distance=dist, pathloss=pl, snr=snr, capacity=capacity, delay=self.delay(dist), los=False)
         if n_subs:
             # For each viewshed (each BS)
@@ -240,16 +249,16 @@ class ScenarioGenerator():
                         coverage_graph.add_node(f'{p[0]}_{p[1]}', type='ue', x=p[0], y=p[1], x_3003 = pos_3003[0], y_3003 = pos_3003[1])
                         dist = np.linalg.norm(pos-p)
                         pl = self.pathgain(dist, f, los=bool(viewshed[p[0], p[1]]), fronthaul=True, indoor=False)
-                        snr = self.get_snr(pl, 40e6)
-                        capacity = self.get_shannon_capacity(snr, 40e6)
+                        snr = self.get_snr(pl, self.fronthaul_bandwidth)
+                        capacity = self.get_shannon_capacity(snr, self.fronthaul_bandwidth, self.fronthaul_mimo)
                         coverage_graph.add_edge(f'{p[0]}_{p[1]}', ndx, distance=dist,pathloss=pl, snr=snr, capacity=capacity, delay=self.delay(dist), los=bool(viewshed[p[0], p[1]]), indoor=False, fronthaul=True)
                     for p in indoor_ues:
                         pos_3003 = self.raster.xy(p[0], p[1])
                         coverage_graph.add_node(f'{p[0]}_{p[1]}', type='ue', x=p[0], y=p[1], x_3003 = pos_3003[0], y_3003 = pos_3003[1])
                         dist = np.linalg.norm(pos-p)
                         pl = self.pathgain(dist, f, los=False, fronthaul=True, indoor=True)
-                        snr = self.get_snr(pl, 40e6)
-                        capacity = self.get_shannon_capacity(snr, 40e6)
+                        snr = self.get_snr(pl, self.fronthaul_bandwidth)
+                        capacity = self.get_shannon_capacity(snr, self.fronthaul_bandwidth, self.fronthaul_mimo)
                         coverage_graph.add_edge(f'{p[0]}_{p[1]}', ndx, distance=dist,pathloss=pl, snr=snr, capacity=capacity, delay=self.delay(dist), los=False, indoor=True, fronthaul=True)
         #print(f"{coverage_graph}")
         return coverage_graph
@@ -495,7 +504,9 @@ class ScenarioGenerator():
         if self.remove_isolated:
             g = self.remove_isolated_gnb(g)
             g = nx.convert_node_labels_to_integers(g)
-        coverage_graph = self.make_coverage_graph(m.ceil(lambda_ue*self.subscriber_area.area/1000000),
+        n_ue = m.ceil(lambda_ue*self.subscriber_area.area/1000000)
+        print(f"UE: {n_ue}, lambda_ue: {lambda_ue}, area: {self.subscriber_area.area/1000000}")
+        coverage_graph = self.make_coverage_graph(n_ue,
                                                   g,
                                                   invtransmat,
                                                   viewsheds,
@@ -575,6 +586,6 @@ if __name__ == '__main__':
     epsg = args.epsg
     truenets_dir = '/home/gabriele.gemmi/nfs/gabriel/results/MedComNet/results/'
     raster_dir = '/home/gabriele.gemmi/nfs/gabriel/data/dtm_fusion/'
-    sc = ScenarioGenerator(args.frequency, args.lambda_gnb, args.area, args.sub_area, args.p_donor, args.double_nodes, args.remove_isolated, args.only_los, args.double_nodes_pl, args.double_nodes_delay, args.epsg, args.strategy, args.ratio, args.colosseum_base_loss, args.subset, args.directed, truenets_dir, raster_dir)
+    sc = ScenarioGenerator(args.frequency, args.lambda_gnb, args.area, args.sub_area, args.p_donor, args.double_nodes, args.remove_isolated, args.only_los, args.double_nodes_pl, args.double_nodes_delay, args.epsg, args.strategy, args.ratio, args.colosseum_base_loss, args.subset, args.directed, truenets_dir, raster_dir, seed)
     sc.set_lambda_ue(args.lambda_ue)
     sc.main()
