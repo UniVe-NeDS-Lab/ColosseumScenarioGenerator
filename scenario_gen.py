@@ -89,10 +89,10 @@ class ScenarioGenerator():
         self.backhaul_bandwidth = bh_bw
         self.fronthaul_mimo = fh_mimo
         self.backhaul_mimo = bh_mimo
-        self.tx_power = 30
-        self.tx_gain = 10
-        self.rx_gain_backhaul = 10  # from Polese et Al
-        self.rx_gain_fronthaul = 3  # need to find a reference
+        self.tx_power = 0
+        self.tx_gain = 30
+        self.rx_gain_backhaul = 30  # from Polese et Al
+        self.rx_gain_fronthaul = 10  # need to find a reference
 
     def set_randomgen(self, seed=None):
         if seed:
@@ -134,7 +134,6 @@ class ScenarioGenerator():
                 mapped_donors = [orig_nodes[di] for di in d]
                 donors += mapped_donors   # Map from nk id to nx ids
                 assert(len(set(mapped_donors)) == n_donors)
-
         for n in vg.nodes():
             if n in donors:
                 coverage_graph.nodes[n]['type'] = 'donor'
@@ -145,7 +144,7 @@ class ScenarioGenerator():
                 vg.nodes[n]['type'] = 'relay'
 
 
-    def pathloss(self, d, f, los=True):
+    def pathloss(self, d, f, los=True, indoor=False):
         # ETSI TR38.901 Channel Model
         if d < 10:
             d = 10  # Workaround for antennas in the same location as the BS
@@ -158,10 +157,13 @@ class ScenarioGenerator():
 
         pl_nlos = 22.4 + 35.3*m.log10(d)+21.3*m.log10(f) - 0.3*(self.h_ut - 1.5)  # + nrv_nlos.rvs(1)[0]
 
+        i_pg = 0
+        if indoor:
+            i_pg = self.get_indoor_pl(f)
         if los:
             return pl_los
         else:
-            return max(pl_los, pl_nlos)
+            return max(pl_los, pl_nlos) + i_pg
 
     def get_snr(self, loss, bandwidth):
         noise = 10*m.log10(1000*self.kb*self.t*bandwidth)
@@ -181,14 +183,11 @@ class ScenarioGenerator():
 
 
     def pathgain(self, d, f, los, fronthaul, indoor):
-        pl = self.pathloss(d, f, los)
+        pl = self.pathloss(d, f, los, indoor)
         if fronthaul:
-            if indoor:
-                return self.tx_power + self.tx_gain - pl + self.rx_gain_fronthaul + self.get_indoor_pl(f)
-            else:
-                return self.tx_power + self.tx_gain - pl + self.rx_gain_fronthaul
+            return self.tx_gain - pl + self.rx_gain_fronthaul
         else:
-            return self.tx_power + self.tx_gain - pl + self.rx_gain_backhaul
+            return self.tx_gain - pl + self.rx_gain_backhaul
 
 
     def delay(self, distance):
@@ -226,18 +225,20 @@ class ScenarioGenerator():
                     continue
                 if (src, tgt) in visgraph.edges():
                     dist = visgraph[src][tgt]['distance']
-                    pl = self.pathgain(dist, f, los=True, fronthaul=False, indoor=False)
+                    pl = self.pathloss(dist, f, los=True)
+                    pg = self.pathgain(dist, f, los=True, fronthaul=False, indoor=False)
                     snr = self.get_snr(pl, self.backhaul_bandwidth)
                     capacity = self.get_shannon_capacity(snr, self.backhaul_bandwidth, self.backhaul_mimo)
-                    coverage_graph.add_edge(src, tgt, distance=dist, pathloss=pl, snr=snr, capacity=capacity, delay=self.delay(dist), los=True)
+                    coverage_graph.add_edge(src, tgt, distance=dist, pathloss=pl, pathgain=pg, snr=snr, capacity=capacity, delay=self.delay(dist), los=True)
                 else:
                     p1 = np.array([visgraph.nodes[src]['x'], visgraph.nodes[src]['y'], visgraph.nodes[src]['z']])
                     p2 = np.array([visgraph.nodes[tgt]['x'], visgraph.nodes[tgt]['y'], visgraph.nodes[tgt]['z']])
                     dist = np.linalg.norm(p2-p1)
-                    pl = self.pathgain(dist, f, los=False, fronthaul=False, indoor=False)
+                    pl = self.pathloss(dist, f, los=False)
+                    pg = self.pathgain(dist, f, los=False, fronthaul=False, indoor=False)
                     snr = self.get_snr(pl, self.backhaul_bandwidth)
                     capacity = self.get_shannon_capacity(snr, self.backhaul_bandwidth, self.backhaul_mimo)
-                    coverage_graph.add_edge(src, tgt, distance=dist, pathloss=pl, snr=snr, capacity=capacity, delay=self.delay(dist), los=False)
+                    coverage_graph.add_edge(src, tgt, distance=dist, pathloss=pl, pathgain=pg, snr=snr, capacity=capacity, delay=self.delay(dist), los=False)
         if n_subs:
             # For each viewshed (each BS)
             for ndx, viewshed in enumerate(viewsheds):
@@ -248,18 +249,20 @@ class ScenarioGenerator():
                         pos_3003 = self.raster.xy(p[0], p[1])
                         coverage_graph.add_node(f'{p[0]}_{p[1]}', type='ue', x=p[0], y=p[1], x_3003 = pos_3003[0], y_3003 = pos_3003[1])
                         dist = np.linalg.norm(pos-p)
-                        pl = self.pathgain(dist, f, los=bool(viewshed[p[0], p[1]]), fronthaul=True, indoor=False)
+                        pl = self.pathloss(dist, f, los=bool(viewshed[p[0], p[1]]))
+                        pg = self.pathgain(dist, f, los=bool(viewshed[p[0], p[1]]), fronthaul=True, indoor=False)
                         snr = self.get_snr(pl, self.fronthaul_bandwidth)
                         capacity = self.get_shannon_capacity(snr, self.fronthaul_bandwidth, self.fronthaul_mimo)
-                        coverage_graph.add_edge(f'{p[0]}_{p[1]}', ndx, distance=dist,pathloss=pl, snr=snr, capacity=capacity, delay=self.delay(dist), los=bool(viewshed[p[0], p[1]]), indoor=False, fronthaul=True)
+                        coverage_graph.add_edge(f'{p[0]}_{p[1]}', ndx, distance=dist,pathloss=pl, pathgain=pg, snr=snr, capacity=capacity, delay=self.delay(dist), los=bool(viewshed[p[0], p[1]]), indoor=False, fronthaul=True)
                     for p in indoor_ues:
                         pos_3003 = self.raster.xy(p[0], p[1])
                         coverage_graph.add_node(f'{p[0]}_{p[1]}', type='ue', x=p[0], y=p[1], x_3003 = pos_3003[0], y_3003 = pos_3003[1])
                         dist = np.linalg.norm(pos-p)
-                        pl = self.pathgain(dist, f, los=False, fronthaul=True, indoor=True)
+                        pl = self.pathloss(dist, f, los=False, indoor=True)
+                        pg = self.pathgain(dist, f, los=False, fronthaul=True, indoor=True)
                         snr = self.get_snr(pl, self.fronthaul_bandwidth)
                         capacity = self.get_shannon_capacity(snr, self.fronthaul_bandwidth, self.fronthaul_mimo)
-                        coverage_graph.add_edge(f'{p[0]}_{p[1]}', ndx, distance=dist,pathloss=pl, snr=snr, capacity=capacity, delay=self.delay(dist), los=False, indoor=True, fronthaul=True)
+                        coverage_graph.add_edge(f'{p[0]}_{p[1]}', ndx, distance=dist,pathloss=pl, pathgain=pg, snr=snr, capacity=capacity, delay=self.delay(dist), los=False, indoor=True, fronthaul=True)
         #print(f"{coverage_graph}")
         return coverage_graph
 
@@ -484,12 +487,12 @@ class ScenarioGenerator():
                 digraph.add_edge(e[1],e[0],**d)
             elif s['type'] == 'ue' or t['type'] == 'donor':
                 #print(s,"\n",t,"\n", d)
-                #if ue is source or donor is destination, only uplink edge
-                digraph.add_edge(e[0],e[1],**d)
+                #if ue is source or donor is destination, only downlink edge
+                digraph.add_edge(e[1],e[0],**d)
             elif s['type'] == 'donor' or t['type'] == 'ue':
                 #print(s,"\n",t,"\n", d)
-                #if ue is source or donor is destination, only uplink edge
-                digraph.add_edge(e[1],e[0],**d)
+                #if ue is source or donor is destination, only downlink edge
+                digraph.add_edge(e[0],e[1],**d)
         return digraph
 
     def generate_scenario(self,vg_path, frequency, lambda_gnb, only_los, lambda_ue):
