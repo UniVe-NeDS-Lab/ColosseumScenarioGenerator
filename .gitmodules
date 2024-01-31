@@ -1,0 +1,3 @@
+[submodule "fivegchannel"]
+	path = fivegchannel
+	url = https://github.com/UniVe-NeDS-Lab/fivegchannel.git

@@ -22,6 +22,8 @@ from shapely.ops import transform
 from shapely.geometry import Point
 import rasterio.mask
 import math as m
+import pandas as pd
+from .fivegchannel.channelmodel import antenna
 
 
 
@@ -85,14 +87,14 @@ class ScenarioGenerator():
         self.buildings = get_buildings(self.boundbox, self.epsg)
 
     def set_channel(self, fh_bw, bh_bw, fh_mimo, bh_mimo):
-        self.fronthaul_bandwidth = fh_bw
+        self.access_bandwidth = fh_bw
         self.backhaul_bandwidth = bh_bw
-        self.fronthaul_mimo = fh_mimo
+        self.access_mimo = fh_mimo
         self.backhaul_mimo = bh_mimo
         self.tx_power = 0
         self.tx_gain = 30
         self.rx_gain_backhaul = 30  # from Polese et Al
-        self.rx_gain_fronthaul = 10  # need to find a reference
+        self.rx_gain_access = 10  # need to find a reference
 
     def set_randomgen(self, seed=None):
         if seed:
@@ -182,10 +184,10 @@ class ScenarioGenerator():
         return loss
 
 
-    def pathgain(self, d, f, los, fronthaul, indoor):
+    def pathgain(self, d, f, los, access, indoor):
         pl = self.pathloss(d, f, los, indoor)
-        if fronthaul:
-            return self.tx_gain - pl + self.rx_gain_fronthaul
+        if access:
+            return self.tx_gain - pl + self.rx_gain_access
         else:
             return self.tx_gain - pl + self.rx_gain_backhaul
 
@@ -226,7 +228,7 @@ class ScenarioGenerator():
                 if (src, tgt) in visgraph.edges():
                     dist = visgraph[src][tgt]['distance']
                     pl = self.pathloss(dist, f, los=True)
-                    pg = self.pathgain(dist, f, los=True, fronthaul=False, indoor=False)
+                    pg = self.pathgain(dist, f, los=True, access=False, indoor=False)
                     snr = self.get_snr(pl, self.backhaul_bandwidth)
                     capacity = self.get_shannon_capacity(snr, self.backhaul_bandwidth, self.backhaul_mimo)
                     coverage_graph.add_edge(src, tgt, distance=dist, pathloss=pl, pathgain=pg, snr=snr, capacity=capacity, delay=self.delay(dist), los=True)
@@ -235,7 +237,7 @@ class ScenarioGenerator():
                     p2 = np.array([visgraph.nodes[tgt]['x'], visgraph.nodes[tgt]['y'], visgraph.nodes[tgt]['z']])
                     dist = np.linalg.norm(p2-p1)
                     pl = self.pathloss(dist, f, los=False)
-                    pg = self.pathgain(dist, f, los=False, fronthaul=False, indoor=False)
+                    pg = self.pathgain(dist, f, los=False, access=False, indoor=False)
                     snr = self.get_snr(pl, self.backhaul_bandwidth)
                     capacity = self.get_shannon_capacity(snr, self.backhaul_bandwidth, self.backhaul_mimo)
                     coverage_graph.add_edge(src, tgt, distance=dist, pathloss=pl, pathgain=pg, snr=snr, capacity=capacity, delay=self.delay(dist), los=False)
@@ -250,19 +252,19 @@ class ScenarioGenerator():
                         coverage_graph.add_node(f'{p[0]}_{p[1]}', type='ue', x=p[0], y=p[1], x_3003 = pos_3003[0], y_3003 = pos_3003[1])
                         dist = np.linalg.norm(pos-p)
                         pl = self.pathloss(dist, f, los=bool(viewshed[p[0], p[1]]))
-                        pg = self.pathgain(dist, f, los=bool(viewshed[p[0], p[1]]), fronthaul=True, indoor=False)
-                        snr = self.get_snr(pl, self.fronthaul_bandwidth)
-                        capacity = self.get_shannon_capacity(snr, self.fronthaul_bandwidth, self.fronthaul_mimo)
-                        coverage_graph.add_edge(f'{p[0]}_{p[1]}', ndx, distance=dist,pathloss=pl, pathgain=pg, snr=snr, capacity=capacity, delay=self.delay(dist), los=bool(viewshed[p[0], p[1]]), indoor=False, fronthaul=True)
+                        pg = self.pathgain(dist, f, los=bool(viewshed[p[0], p[1]]), access=True, indoor=False)
+                        snr = self.get_snr(pl, self.access_bandwidth)
+                        capacity = self.get_shannon_capacity(snr, self.access_bandwidth, self.access_mimo)
+                        coverage_graph.add_edge(f'{p[0]}_{p[1]}', ndx, distance=dist,pathloss=pl, pathgain=pg, snr=snr, capacity=capacity, delay=self.delay(dist), los=bool(viewshed[p[0], p[1]]), indoor=False, access=True)
                     for p in indoor_ues:
                         pos_3003 = self.raster.xy(p[0], p[1])
                         coverage_graph.add_node(f'{p[0]}_{p[1]}', type='ue', x=p[0], y=p[1], x_3003 = pos_3003[0], y_3003 = pos_3003[1])
                         dist = np.linalg.norm(pos-p)
                         pl = self.pathloss(dist, f, los=False, indoor=True)
-                        pg = self.pathgain(dist, f, los=False, fronthaul=True, indoor=True)
-                        snr = self.get_snr(pl, self.fronthaul_bandwidth)
-                        capacity = self.get_shannon_capacity(snr, self.fronthaul_bandwidth, self.fronthaul_mimo)
-                        coverage_graph.add_edge(f'{p[0]}_{p[1]}', ndx, distance=dist,pathloss=pl, pathgain=pg, snr=snr, capacity=capacity, delay=self.delay(dist), los=False, indoor=True, fronthaul=True)
+                        pg = self.pathgain(dist, f, los=False, access=True, indoor=True)
+                        snr = self.get_snr(pl, self.access_bandwidth)
+                        capacity = self.get_shannon_capacity(snr, self.access_bandwidth, self.access_mimo)
+                        coverage_graph.add_edge(f'{p[0]}_{p[1]}', ndx, distance=dist,pathloss=pl, pathgain=pg, snr=snr, capacity=capacity, delay=self.delay(dist), los=False, indoor=True, access=True)
         #print(f"{coverage_graph}")
         return coverage_graph
 
@@ -378,7 +380,7 @@ class ScenarioGenerator():
             return 'yellow'
 
         def get_edge_width(d):
-            if d.get('fronthaul', False):
+            if d.get('access', False):
                 return 0
             if d.get('los', False):
                 return 0.5
@@ -409,7 +411,7 @@ class ScenarioGenerator():
                             nodelist=gnbs,
                             ax=ax,
                             edge_color='mediumseagreen',
-                            edgelist=[(s,r) for s,r,d, in coverage_graph.edges(data=True) if not d.get('fronthaul', False)])
+                            edgelist=[(s,r) for s,r,d, in coverage_graph.edges(data=True) if not d.get('access', False)])
                             #width=[get_edge_width(d) for s, t, d in coverage_graph.edges(data=True)])
         # nx.draw_networkx_labels(coverage_graph,
         #                         pos,
@@ -481,22 +483,135 @@ class ScenarioGenerator():
             s = digraph.nodes[e[0]]
             t = digraph.nodes[e[1]]
             d = e[2]
-            if s['type'] == 'relay' and t['type'] == 'relay':
+            if (s['type'] == 'relay' and t['type'] == 'relay') or (s['type'] == 'ru' and t['type'] == 'ru'):
                 #relay to relay
                 digraph.add_edge(e[0],e[1],**d)
                 digraph.add_edge(e[1],e[0],**d)
-            elif s['type'] == 'ue' or t['type'] == 'donor':
-                #print(s,"\n",t,"\n", d)
-                #if ue is source or donor is destination, only downlink edge
+            elif s['type'] == 'ue' and (t['type'] == 'ru' or t['type'] == 'donor'):
+                #ue to ru
                 digraph.add_edge(e[1],e[0],**d)
-            elif s['type'] == 'donor' or t['type'] == 'ue':
-                #print(s,"\n",t,"\n", d)
-                #if ue is source or donor is destination, only downlink edge
+            elif (s['type'] == 'ru' or s['type'] == 'donor') and t['type'] == 'ue':
+                #ru to ue
                 digraph.add_edge(e[0],e[1],**d)
+            elif (s['type'] == 'du' and t['type'] == 'ru') or (s['type'] == 'ru' and t['type'] == 'du'):
+                #access link
+                digraph.add_edge(e[0],e[1],**d)
+                digraph.add_edge(e[1],e[0],**d)
         return digraph
 
-    def generate_scenario(self,vg_path, frequency, lambda_gnb, only_los, lambda_ue):
+    def compute_gains(self, sg, n1, n2):
+        edge = sg.edges[n1,n2]
+        pos1 = np.array([sg.nodes[n1]['x_3003'],sg.nodes[n1]['y_3003']])
+        pos2 = np.array([sg.nodes[n2]['x_3003'],sg.nodes[n2]['y_3003']])
+        vector1 = pos2-pos1
+        az1 = np.arctan2(vector1[1], vector1[0])%(m.pi*2)
+        vector2 = pos1-pos2
+        az2 = np.arctan2(vector2[1], vector2[0])%(m.pi*2)
+        g1 = antenna.AAh(az1-np.radians(sg.nodes[n1]['azimut']), az1-np.radians(sg.nodes[n1]['azimut']), 8, 8)
+        if sg.nodes[n2]['type'] == 'ue':
+            g2 = 10 #TODO: find a value for UE gain
+        else:
+            g2 = antenna.AAh(az2-np.radians(sg.nodes[n2]['azimut']), az2-np.radians(sg.nodes[n2]['azimut']), 8, 8)
+        edge['g1'] = g1
+        edge['g2'] = g2
+        return g1+g2
+
+
+
+    def add_sectors(self, g, sectors):
+        sg = nx.Graph()
+        for n,d in g.nodes(data=True):
+            if d['type'] in ['relay', 'donor']:
+                id=d['p_id']
+                sg.add_node(f'{id}_meta', **d)
+                sg.nodes[f'{id}_meta']['type'] = 'du'
+                if d['type'] == 'donor':
+                    sg.nodes[f'{id}_meta']['iab-role'] = 'donor'
+                elif d['type'] == 'relay':
+                    sg.nodes[f'{id}_meta']['iab-role'] = 'relay'
+                for i, s in enumerate(sectors[sectors.p_id==id].az.values):
+                    sg.add_node(f'{id}_s{i}', azimut=s,**d)
+                    sg.nodes[f'{id}_s{i}']['type'] = 'ru'
+                    sg.add_edge(f'{id}_s{i}', f'{id}_meta', type='fronthaul')
+            elif d['type'] in ['ue']:
+                sg.add_node(n, **d)
+        
+        #add edges
+        for n,d in g.nodes(data=True): #for every node of the graph
+            if d['type'] in ['relay', 'donor']:
+                id=d['p_id']
+                for i, s in enumerate(sectors[sectors.p_id==id].az.values): ##for every sector
+                    for e in g[n]: #For every edge
+                        eg = g.edges[n,e]
+                        if g.nodes[e]['type'] == 'ue':
+                            sg.add_edge(f'{id}_s{i}', e, distance=eg['distance'], pathloss=eg['pathloss'], los=eg['los'], indoor=eg['indoor'], access=eg['access'], type='fr1')
+                            sg.edges[f'{id}_s{i}', e]['bf_gain'] = self.compute_gains(sg, f'{id}_s{i}', e)
+                        if g.nodes[e]['type'] in ['donor', 'relay']:
+                            rx_id = g.nodes[e]['p_id']
+                            for j, rx_s in enumerate(sectors[sectors.p_id==rx_id].az.values):
+                                sg.add_edge(f'{id}_s{i}', f'{rx_id}_s{j}', distance=eg['distance'], pathloss=eg['pathloss'], los=eg['los'], access=False,type='fr1')
+                                sg.edges[f'{id}_s{i}', f'{rx_id}_s{j}']['bf_gain'] = self.compute_gains(sg, f'{id}_s{i}', f'{rx_id}_s{j}')
+        return sg
+
+    def prune_meas_graph(self, g, sectors, k=2):
+        print(len(g.nodes()), len(g.edges()))
+        for n,d in g.nodes(data=True): #for every node of the graph
+            if d['type'] in ['du']:
+                id=d['p_id']
+                rus = [f'{id}_s{i}' for i,s in enumerate(sectors[sectors.p_id==id].az.values)]
+                for n2,d2 in g.nodes(data=True): #for every other node of the graph
+                    if d2['type'] == 'ue': 
+                        parallel_edges=[(r,n2,g[r][n2]) for r in rus]
+                    if d2['type'] == 'ru':
+                        du = n2.split('_')[0]
+                        id2=d2['p_id']
+                        if id==id2:
+                            continue
+                        rus2 = [f'{du}_s{i}' for i,s in enumerate(sectors[sectors.p_id==id].az.values)]
+                        parallel_edges = list(nx.edge_boundary(g, rus, rus2, data=True))
+                    else:
+                        continue
+                    parallel_edges.sort(key=lambda x:x[2]['bf_gain'], reverse=True)
+                    g.remove_edges_from(parallel_edges[k:])
+        print(len(g.nodes()), len(g.edges()))
+        return g
+                        
+
+
+
+
+    def generate_measurement_graph(self, vg_path, frequency, lambda_gnb, only_los, lambda_ue):
         g = nx.read_graphml(vg_path, node_type=int)
+        sectors = pd.read_csv(vg_path.replace('visibility.graphml.gz', 'sectors.csv'), sep=' ')
+        scenario_name = self.get_scenario_name(only_los, lambda_gnb, lambda_ue, frequency)
+        viewsheds = np.load(vg_path.replace('visibility.graphml.gz', 'viewsheds.npy'))
+        invtransmat = np.load(f'{self.truenets_dir}{self.area}/{self.strategy}/{self.sub_area}/inverse_translation_matrix.npy')
+        if self.subset:
+            to_remove = [n for n in g.nodes() if n not in self.subset]
+            for n in to_remove:
+                g.remove_node(n)
+        if self.remove_isolated:
+            g = self.remove_isolated_gnb(g)
+            g = nx.convert_node_labels_to_integers(g)
+        n_ue = m.ceil(lambda_ue*self.subscriber_area.area/1000000)
+        print(f"UE: {n_ue}, lambda_ue: {lambda_ue}, area: {self.subscriber_area.area/1000000}")
+        coverage_graph = self.make_coverage_graph(n_ue,
+                                                  g,
+                                                  invtransmat,
+                                                  viewsheds,
+                                                  frequency)
+
+        self.set_donors(g, self.p_donor, coverage_graph)
+        sg = self.add_sectors(coverage_graph, sectors)
+        os.makedirs(f'scenarios/{scenario_name}/colosseum/', exist_ok=True)
+        # self.reindex_nodes(sg)
+        sg = self.prune_meas_graph(sg, sectors)
+        dig = self.make_directed(sg)
+        return dig        
+
+    def generate_scenario(self, vg_path, frequency, lambda_gnb, only_los, lambda_ue):
+        g = nx.read_graphml(vg_path, node_type=int)
+        sectors = pd.read_csv(vg_path.replace('visibility.graphml.gz', 'sectors.csv'), sep=' ')
         scenario_name = self.get_scenario_name(only_los, lambda_gnb, lambda_ue, frequency)
         viewsheds = np.load(vg_path.replace('visibility.graphml.gz', 'viewsheds.npy'))
         invtransmat = np.load(f'{self.truenets_dir}{self.area}/{self.strategy}/{self.sub_area}/inverse_translation_matrix.npy')
@@ -517,22 +632,24 @@ class ScenarioGenerator():
 
         self.set_donors(g, self.p_donor, coverage_graph)
         
-        os.makedirs(f'scenarios/{scenario_name}/colosseum/', exist_ok=True)
-        if self.double_nodes:
-            doubled_graph = self.double_iab_nodes(coverage_graph)
-        else:
-            doubled_graph = coverage_graph
+        sg = self.add_sectors(coverage_graph, sectors)
 
-        if only_los:
-            self.remove_nlos(doubled_graph)
+        os.makedirs(f'scenarios/{scenario_name}/colosseum/', exist_ok=True)
+        # if self.double_nodes:
+        #     doubled_graph = self.double_iab_nodes(coverage_graph)
+        # else:
+        #     doubled_graph = coverage_graph
+
+        # if only_los:
+        #     self.remove_nlos(doubled_graph)
             
-        self.reindex_nodes(doubled_graph)
+        self.reindex_nodes(sg)
         if self.directed:
-            doubled_graph = self.make_directed(doubled_graph)
+            doubled_graph = self.make_directed(sg)
         else:
-            self.generate_colosseum(doubled_graph, scenario_name)
+            self.generate_colosseum(sg, scenario_name)
         
-        return doubled_graph
+        return sg
         
     def read_vg(self, lambda_gnb):
         path = f'{self.truenets_dir}/{self.area}/{self.strategy}/{self.sub_area}/r1/1/{self.ratio}/{lambda_gnb}/visibility.graphml.gz'
