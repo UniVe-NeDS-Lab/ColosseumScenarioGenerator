@@ -504,9 +504,14 @@ class ScenarioGenerator():
         pos1 = np.array([sg.nodes[n1]['x_3003'],sg.nodes[n1]['y_3003']])
         pos2 = np.array([sg.nodes[n2]['x_3003'],sg.nodes[n2]['y_3003']])
         vector1 = pos2-pos1
-        az1 = np.arctan2(vector1[1], vector1[0])%(m.pi*2)
+        az1 = ((m.pi/2 - np.arctan2(vector1[1], vector1[0])))
+        if az1 < 0:
+            az1 =+ 2*m.pi
         vector2 = pos1-pos2
-        az2 = np.arctan2(vector2[1], vector2[0])%(m.pi*2)
+        az2 = ((m.pi/2 - np.arctan2(vector2[1], vector2[0])))
+        if az2 < 0:
+            az2 =+ 2*m.pi
+        
         g1 = antenna.AAh(az1-np.radians(sg.nodes[n1]['azimut']), az1-np.radians(sg.nodes[n1]['azimut']), 8, 8)
         if sg.nodes[n2]['type'] == 'ue':
             g2 = 10 #TODO: find a value for UE gain
